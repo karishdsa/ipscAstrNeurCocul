@@ -1,0 +1,333 @@
+---
+title: "Post deconvolution- checking for correlation of cell type proportions with the PC axes"
+author: "Karishma D'Sa"
+output: 
+  html_document:
+    code_folding: hide
+    df_print: paged
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+```{r libraries, include=F}
+library(DESeq2)
+library(ggplot2)
+library(knitr)
+library(here)
+library(pcaExplorer)
+library(tidyverse)
+library(data.table)
+library(tximport)
+library(RColorBrewer)
+library(pheatmap)
+
+library(gplots)
+source(here("./R/plot_setting.R"))
+
+source(here("./R/common_sample.R"))
+source(here("./R/common_salmon.R"))
+
+outPath <- here("../results/post_deconv_PCA_excl_exen/")
+
+```
+
+```{r functions, echo=F, include =F}
+add_celltype_prop_2colData <- function(celltypeProp_fname, deseq_obj){
+  #celltypeProp_fname <- celltype_propfile ; deseq_obj <- ddsCollapsed
+  ctprop <- fread(celltypeProp_fname)
+  setDF(ctprop)
+  rownames(ctprop) <- ctprop$V1
+  ctprop$V1 <- NULL
+  col_rownames <- rownames(colData(deseq_obj))
+  
+  colData(deseq_obj) <- merge(colData(deseq_obj) , ctprop, by = "row.names", all.x=T)
+  
+  colData(deseq_obj) <- colData(deseq_obj)[match(col_rownames, colData(deseq_obj)[,1]), ]
+  stopifnot(colData(deseq_obj)$Row.names== col_rownames)
+  rownames(colData(deseq_obj)) <- colData(deseq_obj)[,1]
+  colData(deseq_obj)[,1] <- NULL
+  return(deseq_obj)
+}
+  
+plotCorrOfCovWithPCs <- function(res_pca){
+  #1st 8 PCs
+  par(mfrow=c(4,2))
+
+  cex.before <- par("cex")
+  par(cex = 0.55)
+  
+  {plotPCcorrs(res_pca,pc =1)
+    abline(h=-log10(0.05),col="red")}
+  {plotPCcorrs(res_pca,pc =2)
+      abline(h=-log10(0.05),col="red")}
+  {plotPCcorrs(res_pca,pc =3)
+      abline(h=-log10(0.05),col="red")}
+  {plotPCcorrs(res_pca,pc =4)
+      abline(h=-log10(0.05),col="red")}
+  {plotPCcorrs(res_pca,pc =5)
+      abline(h=-log10(0.05),col="red")}
+  {plotPCcorrs(res_pca,pc =6)
+      abline(h=-log10(0.05),col="red")}
+  {plotPCcorrs(res_pca,pc =7)
+      abline(h=-log10(0.05),col="red")}
+  {plotPCcorrs(res_pca,pc =8)
+      abline(h=-log10(0.05),col="red")}
+  
+  par(cex = cex.before)
+}
+
+#from RR
+correlatePCs <- function (pcaobj, coldata, pcs = 1:4){
+  coldataTypes <- sapply(coldata, class)
+  x <- pcaobj$x
+  res_pval <- matrix(NA, nrow = length(pcs), ncol = ncol(coldata))
+  colnames(res_pval) <- colnames(coldata)
+  rownames(res_pval) <- paste0("PC_", pcs)
+  
+  res_stat <- matrix(NA, nrow = length(pcs), ncol = ncol(coldata))
+  colnames(res_stat) <- colnames(coldata)
+  rownames(res_stat) <- paste0("PC_", pcs)
+  for (i in 1:ncol(coldata)) {
+    for (j in pcs) {
+      if (coldataTypes[i] %in% c("factor", "character")) {
+        if (length(levels(coldata[, i])) > 1) {
+          res_stat[j, i] <- kruskal.test(x[, j], coldata[,i])$statistic
+          res_pval[j, i] <- kruskal.test(x[, j], coldata[,i])$p.value
+        }
+      }
+      else {
+        res_stat[j, i] <- cor.test(x[, j], coldata[, i], method = "spearman")$estimate
+        res_pval[j, i] <- cor.test(x[, j], coldata[, i], method = "spearman")$p.value
+        
+      }
+    }
+  }
+  
+  res <- setNames(list(res_stat, res_pval), c("statistic", "pvalue"))
+  return(res)
+}
+
+```
+
+
+```{r load salmon_txi quant, echo = FALSE, include=FALSE}
+
+load(here("../results/salmon_quant/salmon_txiQuantification.rda"))
+
+#getting summarized gene 
+tx2gene <- fread("/home/kdsa/ipscAstrocyteNeuron/files/salmonRef/tx2gene_HomoSapiens93_genFrom_ensembldb.tsv")
+
+txi_sum <- summarizeToGene(txi, tx2gene, ignoreTxVersion = TRUE)
+```
+
+
+```{r getSample info, include = FALSE}
+
+#get the sample info
+sampleIds <- colnames(txi_sum$counts)
+sampleInfo <-  getSampleInfo4DeseqColdata(sampleIds)
+head(sampleInfo,2)
+head(colnames(txi$counts), 2)
+all(rownames(sampleInfo) == colnames(txi$counts)) 
+#the rownames of sampleInfo should match the order in txi$counts
+target <- colnames(txi$counts)
+sampleInfo <- sampleInfo[ match(target, rownames(sampleInfo)),]
+all(rownames(sampleInfo) == colnames(txi$counts))
+
+#head(sampleInfo,2)
+sampleInfo$group <- factor(paste0(sampleInfo$cells,"_", sampleInfo$treatment))
+sampleInfo$collapse_group <- factor(paste0(sampleInfo$cells, sampleInfo$treatment, "_", sampleInfo$indi ))
+sampleInfo$indi <- factor(sampleInfo$indi)
+
+```
+
+```{r dds, include = FALSE}
+
+dds <- DESeqDataSetFromTximport(txi_sum, 
+                                colData = sampleInfo,
+                                design <- ~ group) 
+
+colData(dds)
+```
+
+
+Selecting for genes expressed in all samples of cell+treatment
+
+
+```{r filter, include=FALSE}
+
+dds <- estimateSizeFactors(dds)
+
+# Filter to keep only genes with a minimum count of 1 across all samples in each group ( cell + treatment)
+filter_count <- DEGreport::degFilter(counts = counts(dds),
+                                      metadata = as.data.frame(colData(dds)),
+                                      group = "group",
+                                      min = 1, 
+                                      minreads = 0) 
+dds <- dds[rownames(filter_count),]
+cat("Genes in final count matrix: ", nrow(filter_count))
+
+```
+
+
+
+```{r Collapsing the replicates, include=FALSE}
+#collapse technical replicates
+ddsCollapsed <- collapseReplicates( dds,
+                                    groupby = dds$collapse_group,
+                                    run = dds$replicate )
+
+rm(dds)
+```
+
+
+
+
+# Dataset
+Using the dataset filtered to keep only genes with a minimum count of 1 across all samples in each group (cell + treatment) <br>
+The replicates are collapsed <br>
+```{r adding the cell type prop, include=F}
+
+celltype_propfile <-here("../results/deconv_scaden/allsamples_run/predictions_nsamples/scaden_pred_comb_var0_1_cells3000_samples2000.txt") 
+dds <- add_celltype_prop_2colData(celltype_propfile, ddsCollapsed)
+stopifnot( rownames(colData(dds)) == rownames(colData(ddsCollapsed)) )
+which(rownames(colData(dds)) != colnames(assay(dds)))
+colnames(assay(dds)) == rownames(colData(dds))
+rm(ddsCollapsed)
+
+vsd <- vst(dds, blind=TRUE)
+```
+
+<br><br>
+#Heatmap of sample to sample distances
+Applying the dist() to the transpose of the transformed count matrix to get sample-to-sample distances. A heatmap of this distance matrix gives us an overview over similarities and dissimilarities between samples.
+
+```{r sample-to-sample distances, include = FALSE}
+#sample clustering
+#------------------
+# get sample-to-sample distances.
+#vst
+sampleDists <- dist(t(assay(vsd)))
+sampleDists
+
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd$cells, vsd$treatment, sep="-")
+colnames(sampleDistMatrix) <- NULL
+
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+
+```
+
+#PCA
+## Fraction of variance explained by each PC ( Scree plot)
+
+```{r scree plot,echo = FALSE}
+pcaobj <- prcomp(t(assay(vsd)))
+pcascree(pcaobj, type = "pev", title = "Proportion of variance explained by each PC ")
+pcascree(pcaobj, type = "cev", title = "Cumulative proportion of variance explained with the addition of each PC")
+```
+
+
+## Sources of variability : Correlation of each covariate with the PC axes using correlatePCs()
+
+```{r corrPC, echo=FALSE}
+#names(colData(vsd))
+#cols - cells treatment indi replicate    Position  eRIN age_ofdonor  sex_of_donor
+#[1] "cells"          "treatment"      "indi"           "replicate"      "eRIN"          
+# [6] "age_of_donor"   "sex_of_donor"   "group"          "collapse_group" "runsCollapsed" 
+#[11] "celltype_1"     "celltype_0"     "celltype_5"     "celltype_6"     "celltype_2"    
+#[16] "celltype_3"     "celltype_4"     "celltype_7"  
+
+cols2sel <- c(1,2,3,5,6, 7,8, 11:18) 
+tmp <- colData(vsd)[,cols2sel] #needs to be factor
+head(tmp, 2)
+tmp$indi <- as.factor(tmp$indi)
+tmp$cells <- as.factor(tmp$cells)
+tmp$treatment <- as.factor(tmp$treatment)
+tmp$sex_of_donor <- as.factor(tmp$sex_of_donor)
+res_pca <- pcaExplorer::correlatePCs(pcaobj,tmp,pcs = 1:20) # pvals returned
+
+plotCorrOfCovWithPCs(res_pca)
+```
+
+
+<br>
+Heatmap of the pvalues of the correlations of the PC axes with all the covariates <br>
+```{r pc corr values and pvals, echo=F, include=F}
+
+nPCs <- 22
+corr_pval_pcs_cov <- correlatePCs(pcaobj, coldata =tmp, pcs = 1:nPCs)
+
+png(paste0(outPath, "corrPC_covariates_corrHeatmap.png"), res=300, units = "in", width=8, height=6)
+heatmap.2(x = t(corr_pval_pcs_cov$statistic), 
+          Colv = NA, 
+          Rowv = NA,
+          dendrogram = "none",
+          col=brewer.pal(11,"YlOrRd"),
+          trace = "none",
+          density.info = "none", 
+          key = TRUE, 
+          key.xlab = "Correlation estimate/statistic", 
+          cexRow = 0.65, cexCol = 0.65)
+
+dev.off()
+```
+
+
+```{r pc corr values,  include=F }
+png(paste0(outPath, "corrPC_covariates_corrPvalHeatmap.png"), res=300, units = "in", width=8, height=6)
+heatmap.2(x = t(-log10(corr_pval_pcs_cov$pvalue)), 
+          Colv = NA, 
+          Rowv = NA,
+          dendrogram = "none",
+          col=brewer.pal(11,"YlOrRd"),
+          trace = "none",
+          density.info = "none", 
+          key = TRUE, 
+          key.xlab = "-log10(p-value)", 
+          cexRow = 0.65, cexCol = 0.65)
+dev.off()
+
+```
+
+```{r displ heatmap pval corr PC with cov , echo = TRUE}
+include_graphics(paste0(outPath, "corrPC_covariates_corrPvalHeatmap.png"))
+
+```
+
+Heatmap of the correlations of the PC axes with all the covariates
+```{r displ heatmap corr PC with cov , echo = TRUE}
+include_graphics(paste0(outPath, "corrPC_covariates_corrHeatmap.png"))
+
+```
+
+```{r display table, echo=F}
+
+corr_pval_PCs <- corr_pval_pcs_cov$pvalue %>% 
+  as_tibble() %>% 
+  dplyr::mutate(PC = str_c("PC_", c(1:nPCs))) %>%
+    tidyr::gather(key = covariate, value = p, -PC)  #melt
+
+corr_PCs <- corr_pval_pcs_cov$statistic %>% 
+  as_tibble() %>% 
+  dplyr::mutate(PC = str_c("PC_", c(1:nPCs))) %>%
+    tidyr::gather(key = covariate, value = test_statistic, -PC)
+
+corr_pval_PCs <- merge(corr_PCs, corr_pval_PCs, by = c("PC", "covariate"), all=T)
+
+
+corr_pval_PCs <- corr_pval_PCs[order(corr_pval_PCs$p),]
+corr_pval_PCs$p <- format(corr_pval_PCs$p, scientific = T, digits = 2 )
+DT::datatable(setDT(corr_pval_PCs))
+```
+

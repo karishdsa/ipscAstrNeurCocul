@@ -1,0 +1,348 @@
+---
+title: "Annotating STAR junctions"
+author: "Karishma D'Sa"
+output: 
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+# Annotating STAR junctions
+<b>
+Annotating the STAR junctions to check how much of novel splicing is seen in the coculture vs astrocytes. <br><br>
+Does the overall % of splicing noise as captured by novel donor or acceptor junctions increase with oligomer treatment?</b> <br>
+<br>
+
+
+<b>Filtering the junctions</b> to keep those <br>
+ - which do not map to ENCODE's blacklist regions of the genome and <br>
+ - which have a gap of \>25bp (25 nucleotides is the min length reqd for splicing) <br>
+and classifying them as annnotated, novel donor, acceptor etc. using the junctions annotate function from dasper, Zhang et al. biorxiv, 2021 https://www.biorxiv.org/content/10.1101/2021.03.29.437534v1.full .
+<br>
+Figure below from the paper is a schematic representation of the categories of splicing events identifed by dasper <br>
+```{r display splice events, eval=T, echo=F,  fig.height=10, fig.width=12, ncol=1}
+
+knitr::include_graphics("/home/ipscAstrocyteNeuron/files/dasper_splicingCategories.jpg")
+```
+
+<br>
+<i>This script has partially been run locally using R 4.1 as dasper requires R > version 4 which is not installed currently on the rytenlab server.
+</i>
+
+
+```{r libs, include=FALSE, eval=T}
+library(data.table)
+library(magrittr)
+library(stringr)
+library(SummarizedExperiment)
+library(GenomicRanges)
+library(rtracklayer)
+
+library(tidyverse)
+library(dplyr)
+library(readr)
+
+library(reshape2)
+
+```
+```{r compile star junct, include = F, eval=F}
+#This chunk of code puts together all the STAR junctions for download to process to annotate  locally
+source("/home/ipscAstrocyteNeuron/ipscAstroNeu/R/star_junc_common.R")
+junc_path <- "/data/RNA_seq_ipsc/processed/star/"
+#loading the junctions from STAR
+junc <- load_sj_df(junc_path)
+head(junc, 2)
+length(unique(junc$Sample))
+save(junc, file = "/home/ipscAstrocyteNeuron/results/star/star_junc.rda")
+
+```
+
+```{r annotate star junct, include = F, eval=F}
+#This chunk of code to annotate the star junctions has been run locally
+library(dasper)
+
+source("C:/WorkArea/ipscAstrocyteNeuron/scripts/R/star_junc_common.R")
+
+#get sample info 
+sample_info <- read.delim("C:/WorkArea/ipscAstrocyteNeuron/results/files/sample_meta_info_as4deseqCol.tsv")
+sample_info$sample_id <- rownames(sample_info)
+rownames(sample_info) <- NULL
+
+#Annotate the junctions after converting to a ranged summarised expt - 
+load("C:/WorkArea/ipscAstrocyteNeuron/results/star/star_junc.rda")
+gtf_file <- "C:/WorkArea/ipscAstrocyteNeuron/ensembl_gtf_gff3_v93/Homo_sapiens.GRCh38.93.gtf"
+
+ann_rse_junc <- create_ann_rse_jx(sj_df = junc,
+                        sample_info = sample_info,
+                        sample_id_col = "sample_id",
+                        gtf_file = gtf_file) 
+
+save(ann_rse_junc, file = "C:/WorkArea/ipscAstrocyteNeuron/results/star/star_ann_rse_junc.rda")
+
+##########
+#additional code to save the junctions annotated as ambiguous and none - as they have to be excluded prior to leafcutter
+load("C:/WorkArea/ipscAstrocyteNeuron/results/star/star_ann_rse_junc.rda")
+annot <- rowRanges(ann_rse_junc)[ , "type"] %>% 
+  as.data.frame()%>%
+  tibble::rownames_to_column(var = "junction_id")
+head(annot, 2)
+table(annot$type, exclude = NULL)
+annot_bed_ambig <- annot %>% dplyr::mutate(start = start -1) %>%
+              filter(type =="ambig_gene") %>% #data does not contain type = none
+              dplyr::mutate(score = 0) %>%
+              select(  seqnames, start, end, type, score, strand )
+
+
+fwrite(annot_bed_ambig, file = "C:/WorkArea/ipscAstrocyteNeuron/results/star/star_ann_junctID_ambig.bed", 
+       quote=F, row.names = F, sep="\t", col.names = F )
+#saving all
+fwrite(annot, file = "C:/WorkArea/ipscAstrocyteNeuron/results/star/star_ann_junctID_type.tsv", 
+       quote=F, row.names = F, sep="\t" )
+
+
+
+```
+
+```{r filtering junctions, eval = F, include=F}
+#execution back on server from here
+
+exclude_ENCODE_blacklist_regions <- function(ranged_summ_expt, file_ENCODE_blacklist ){
+  #ranged_summ_expt <- ann_rse_junc  
+  
+    # Load encode blacklist (https://github.com/Boyle-Lab/Blacklist/tree/master/lists)
+    ENCODE_blacklist <- rtracklayer::import(file_ENCODE_blacklist)
+    ENCODE_blacklist <- 
+          ENCODE_blacklist %>% 
+          as.data.frame() %>% 
+          dplyr::mutate(chr = str_replace(seqnames, "chr", "")) %>% 
+          dplyr::select(-seqnames) %>% 
+          makeGRangesFromDataFrame(.,
+                                   keep.extra.columns = TRUE,
+                                   seqnames.field = "chr",
+                                   start.field = "start",
+                                   end.field = "end",
+                                   ignore.strand = FALSE)
+    # Remove  regions overlapping with ENCODE blacklist regions
+    overlapped <- GenomicRanges::findOverlaps(query = ENCODE_blacklist,
+                                                  subject = rowRanges(ranged_summ_expt),
+                                                          ignore.strand = F)
+
+      indexes <- subjectHits(overlapped)
+      ranged_summ_expt <- ranged_summ_expt[-indexes, ]
+      return(ranged_summ_expt)
+
+}
+
+load("/home/ipscAstrocyteNeuron/results/star/star_ann_rse_junc.rda")
+
+#exclude ENCODE blacklist regions
+file_ENCODE <- "/data/references/ENCODE_blacklist_v2/hg38-blacklist.v2.bed"
+rse_junc <- exclude_ENCODE_blacklist_regions(ranged_summ_expt = ann_rse_junc,
+                                  file_ENCODE_blacklist = file_ENCODE  )
+
+#excluded
+length(rowRanges(ann_rse_junc)) - length(rowRanges(rse_junc)) #25274 exluded - blacklist regions
+
+length(rowRanges(ann_rse_junc)) #
+#exclude introns of length < 25nucleotides as this is the min length reqd for splicing
+# junctions with width < 25
+excl_width25 <- which(c(rowRanges(rse_junc) %>% width()) < 25)
+
+ann_rse_junc_filtered <- rse_junc[-excl_width25,]
+length(excl_width25) #6128 junctions with width <25
+
+save(ann_rse_junc_filtered, file = "/home/ipscAstrocyteNeuron/results/star/star_ann_rse_junc_filtered.rda")
+```
+Of the 1,650,858 splice junctions obtained from STAR, 31402 (1.90%) were excluded. Of the 30549 junctions, 25274 were in ENCODEs blacklist regions and 6128 had width \<25
+
+
+# Summary plots of annotated junctions  
+
+```{r count percent each annotation, eval=F, include=F}
+
+load("/home/ipscAstrocyteNeuron/results/star/star_ann_rse_junc_filtered.rda")
+filtered_counts <- assay(ann_rse_junc_filtered) %>%
+                      as.data.frame()
+filtered_counts <- filtered_counts %>% 
+  tibble::rownames_to_column(var = "junction_id")
+melted_counts <- melt(filtered_counts, id = "junction_id", value.name = "count", variable.name = "sample_id")
+melted_counts <- melted_counts %>%
+                  dplyr::filter(count >0)
+
+head(melted_counts, 2)
+length(which(melted_counts$count >0))
+#add the annotation type - getting all junction ids as they are also present in the melted data 
+anno <- rowRanges(ann_rse_junc_filtered)[ , "type"] %>% 
+        mcols() %>%
+        as.data.frame() %>%
+        tibble::rownames_to_column(var = "junction_id")
+head(anno, 2)
+
+#get sample info
+sample_info <- read.delim("/home/ipscAstrocyteNeuron/files/sample_meta_info_as4deseqCol.tsv")
+
+sample_info <- sample_info %>% 
+                tibble::rownames_to_column(var="sample_id") %>%     
+                mutate(cells_treatment=paste0(cells, "_", treatment)) %>%
+                select(sample_id, cells_treatment, indi, replicate, cells, treatment)
+head(sample_info, 2)
+
+#merge the melted counts, annotation type, sample info 
+comb <- melted_counts %>% 
+        left_join(anno) %>% 
+        left_join(sample_info)
+rm(melted_counts, anno, filtered_counts)
+
+unique(sample_info$cells_treatment)
+#generate a table of counts per cell_treatment
+#setDT(comb)
+head(comb, 1)
+save(comb,file= "/home/ipscAstrocyteNeuron/results/star/star_ann_junc_filtered_melted.rda")
+
+load("/home/ipscAstrocyteNeuron/results/star/star_ann_junc_filtered_melted.rda")
+counts_pct <- comb %>% dplyr::filter(treatment != "1uM_syn_oligomer_and_exenatid" ) %>%
+                    dplyr::group_by(cells_treatment, indi , type) %>%
+                dplyr::summarise(n_junctions = n_distinct(junction_id),
+                   n_junction_readcounts = sum(count)) %>%
+                mutate(total_junctions = sum(n_junctions), 
+                       total_junction_readcounts = sum(n_junction_readcounts),
+                       pct_junction = (n_junctions/total_junctions)*100,
+                       pct_readcounts = (n_junction_readcounts/total_junction_readcounts)*100)
+write_delim(counts_pct, "/home/ipscAstrocyteNeuron/results/star/star_ann_junc_summary_indi_inclNeuron.tsv", delim="\t", quote= F)
+
+#getting the counts for annotation types per cell_treatment
+#using n_distinct() as multi controls junction info
+summ <- comb %>% dplyr::filter(treatment != "1uM_syn_oligomer_and_exenatid" ) %>%
+                    dplyr::group_by(cells_treatment, type) %>%
+                dplyr::summarise(n_junctions = n_distinct(junction_id),
+                   n_junction_readcounts = sum(count)) %>%
+                mutate(total_junctions = sum(n_junctions), 
+                       total_junction_readcounts = sum(n_junction_readcounts),
+                       pct_junction = (n_junctions/total_junctions)*100,
+                       pct_readcounts = (n_junction_readcounts/total_junction_readcounts)*100)
+write_delim(summ, "/home/ipscAstrocyteNeuron/results/star/star_ann_junc_summary_inclNeuron.tsv", delim="\t", quote= F)
+
+```
+## % junctions of each type of total annotated per individual by cell+treatment
+The replicates have been collapsed getting the total read counts per junction and  the count of unique junctions per individual.
+<br>
+
+```{r, gen_summ_junc_ann_plot_indi, eval=F, include=F}
+source("~/ipscAstrocyteNeuron/ipscAstroNeu/R/plot_setting.R")
+library(ggforce)
+summ_indi <- read_tsv("/home/ipscAstrocyteNeuron/results/star/star_ann_junc_summary_indi_inclNeuron.tsv")
+head(summ_indi,2)
+summ_indi$cells_treatment <- gsub("_1uM", "", summ_indi$cells_treatment )
+  
+  y_label <- "Percentage of nJunctions/total \nper individual \n (%)"
+  ggplot(summ_indi, aes(x = type, y=pct_junction, fill=cells_treatment)) + 
+    geom_boxplot() +
+    geom_point(shape = 21, position = position_jitterdodge(jitter.width = 0.05, jitter.height = 0.05)) +
+    ggtitle("% junction type / total junctions per individual \n per cell+treatment") +
+    theme(legend.position="right", legend.box = "vertical") +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) 
+  labs(x = "Junction annotation type", y = y_label) 
+  
+ggsave("/home/ipscAstrocyteNeuron/results/star/star_ann_junc_summary_indi_inclNeuron.png", dpi=300)
+
+#reads
+ y_label <- "Percentage of nJunction reads per annotation type/total junction reads \nper individual \n (%)"
+  ggplot(summ_indi, aes(x = type, y=pct_readcounts, fill=cells_treatment)) + 
+    geom_boxplot() +
+    geom_point(shape = 21, position = position_jitterdodge(jitter.width = 0.05, jitter.height = 0.05)) +
+    ggtitle("% junction reads per annotation type/total junction reads per indi\n per cell+treatment") +
+    theme(legend.position="right", legend.box = "vertical") +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+     facet_zoom(ylim = c(0,10), zoom.size = 1) +  
+labs(x= "Junction annotation type", y=y_label)  
+  
+ggsave("/home/ipscAstrocyteNeuron/results/star/star_ann_junc_summary_indi_readcounts_inclNeuron.png", dpi=300)
+
+```
+
+```{r display plots, eval=T, echo=F,  fig.height=10, fig.width=12, ncol=1}
+files <- list.files("/home/ipscAstrocyteNeuron/results/star/", pattern = "*_inclNeuron.png", full.names = T)
+files <- files[ grep ("_regrp", files, invert = T)]
+knitr::include_graphics(files)
+
+```
+There doesn't look to be much difference between the percentages of the novel junctions identified between the astrocytes treated vs untreated or the astrocyte+neuron treated vs untreated.<br>
+Plotting the single neuronal sample just to get an idea where the percentages of novel junctions stand in comparison.
+In the case of the annotated there seems to be a difference, however there is just one sample. 
+We can see there is a <br>
+- slight decrease in the % of annotated junctions
+- slight increase in the % of novel junctions in the cocultures compared to the astrocyte single culture. <br>
+However, cannot say this is due to the adddition of neurons as 
+while the single neuronal sample with treatment looks to be in line with the coculture samples, the untreated neuronal sample overlaps with the coculture and astrocyte samples. 
+
+
+## Clubbing the novel junctions - regrouping
+Excluding the junctions of type : ambiguous genes <br>
+<br>
+Regrouping : <br>
+partially annotated = includes novel_acceptor, novel_donor, novel_combo and novel_exon_skip junctions <br>
+
+annotated = annotated junctions <br>
+unannotated = unannotated junctions <br>
+
+```{r, gen_summ_junc_ann_regroup, eval=F, include=F}
+load("/home/ipscAstrocyteNeuron/results/star/star_ann_junc_filtered_melted.rda")
+head(comb, 2)
+
+comb <- comb %>% 
+  dplyr::filter(type !="ambig_gene") %>%
+  dplyr::mutate(anno_grp = ifelse(type == "annotated", "annotated",
+                                    ifelse(type == "unannotated", "unannotated", "partially_annotated"))) 
+
+counts_pct <- comb %>% dplyr::filter(treatment != "1uM_syn_oligomer_and_exenatid" ) %>%
+                    dplyr::group_by(cells_treatment, indi , anno_grp) %>%
+                dplyr::summarise(n_junctions = n_distinct(junction_id),
+                   n_junction_readcounts = sum(count)) %>%
+                mutate(total_junctions = sum(n_junctions), 
+                       total_junction_readcounts = sum(n_junction_readcounts),
+                       pct_junction = (n_junctions/total_junctions)*100,
+                       pct_readcounts = (n_junction_readcounts/total_junction_readcounts)*100)
+write_delim(counts_pct, "/home/ipscAstrocyteNeuron/results/star/star_ann_junc_summary_indi_regrp_inclNeuron.tsv", delim="\t", quote= F)
+
+```
+
+
+```{r, gen_summ_junc_ann_plot_indi_regrp, eval=F, include=F}
+#source("~/ipscAstrocyteNeuron/ipscAstroNeu/R/plot_setting.R")
+summ_indi <- read_tsv("/home/ipscAstrocyteNeuron/results/star/star_ann_junc_summary_indi_regrp_inclNeuron.tsv")
+head(summ_indi,2)
+summ_indi$cells_treatment <- gsub("_1uM", "", summ_indi$cells_treatment )
+
+  y_label <- "Percentage of nJunctions/total \nper individual \n (%)"
+  ggplot(summ_indi, aes(x = anno_grp, y=pct_junction, fill=cells_treatment)) + 
+    geom_boxplot() +
+    geom_point(shape = 21, position = position_jitterdodge(jitter.width = 0.05, jitter.height = 0.05)) +
+    ggtitle("% junction type / total junctions per individual \n per cell+treatment") +
+    theme(legend.position="right", legend.box = "vertical") +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) +  
+labs(x= "Junction annotation type", y=y_label)  
+  
+ggsave("/home/ipscAstrocyteNeuron/results/star/star_ann_junc_summary_indi_regrp_inclNeuron.png", dpi=300)
+
+#reads
+  ggplot(summ_indi, aes(x = anno_grp, y=pct_readcounts, fill=cells_treatment)) + 
+    geom_boxplot() +
+    geom_point(shape = 21, position = position_jitterdodge(jitter.width = 0.05, jitter.height = 0.05)) +
+    ggtitle("% junction reads per annotation type/total junction reads per indi\n per cell+treatment") +
+    theme(legend.position="right", legend.box = "vertical") +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+     facet_zoom(ylim = c(0,10), zoom.size = 1) +
+      labs(x= "Junction annotation type", y="Percentage of nJunction reads per annotation type/total junction reads \nper individual \n (%)")
+ggsave("/home/ipscAstrocyteNeuron/results/star/star_ann_junc_summary_indi_regrp_readcounts_inclNeuron.png", dpi=300)
+
+```
+```{r dsplay regrp plots, eval=T, echo=F,  fig.height=10, fig.width=12, ncol=1}
+files <- list.files("/home/ipscAstrocyteNeuron/results/star/", pattern = "*_inclNeuron.png", full.names = T)
+files <- files[ grep ("_regrp", files)]
+knitr::include_graphics(files)
+
+```

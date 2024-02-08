@@ -1,0 +1,372 @@
+---
+title: "Differential gene expression analysis using DESeq2 "
+author: "Karishma D'Sa"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+The PCA analysis run post deconvolution, including the cell type proportions, indicated  while correcting for PCs 2 and 3 in the intial run should be taking care of the cell type proportions ( PC3 capturing cell type 4 changes), PC4 is weakly capturing cell type 6. <br>
+Therefore running the analysis correcting for PCs 2, 3, and 4 . <br><br>
+
+```{r libraries, include=FALSE}
+library(data.table)
+library(tximport)
+
+library(DESeq2)
+library(DEGreport)
+library(ggplot2)
+library(knitr)
+library(tximport)
+
+library(EnhancedVolcano)
+library(pcaExplorer)
+library(ggpubr) 
+library(gridExtra)
+
+library(tidyverse)
+library(magrittr)
+library(here)
+
+source(here("./R/common_sample.R"))
+source(here("./R/common_salmon.R"))
+source(here("./R/common_postQuant_QC.R"))
+source(here("./R/common_post_deconv_PCA.R"))
+source(here("./R/plot_setting.R"))
+
+outPath <- here("../results/dge_postdeconv/correct_PC234")
+
+```
+
+```{r loading the quant, echo = FALSE, eval=FALSE}
+
+load(here("../results/salmon_quant/salmon_txiQuantification_excl_exenatide.rda"))
+
+#getting summarized gene 
+tx2gene <- fread("/home/ipscAstrocyteNeuron/files/salmonRef/tx2gene_HomoSapiens93_genFrom_ensembldb.tsv")
+txi_sum <- summarizeToGene(txi, tx2gene, ignoreTxVersion = TRUE)
+
+```
+
+```{r deseq coldata, echo = FALSE, eval=FALSE}
+#get the sample info
+sampleIds <- colnames(txi_sum$counts)
+sampleInfo <-  getSampleInfo4DeseqColdata(sampleIds)
+all(rownames(sampleInfo) == colnames(txi$counts)) 
+#the rownames of sampleInfo should match the order in txi$counts
+target <- colnames(txi$counts)
+sampleInfo <- sampleInfo[ match(target, rownames(sampleInfo)),]
+all(rownames(sampleInfo) == colnames(txi$counts))
+
+```
+
+```{r samplleInfo, include = FALSE, eval=FALSE}
+sampleInfo$group <- factor(paste0(sampleInfo$cells,"_", sampleInfo$treatment))
+sampleInfo$collapse_group <- factor(paste0(sampleInfo$cells, sampleInfo$treatment, "_", sampleInfo$indi ))
+sampleInfo$indi <- factor(sampleInfo$indi)
+
+```
+
+```{r deseq obj, echo = FALSE, eval=FALSE}
+dds <- DESeqDataSetFromTximport(txi_sum, 
+                                colData = sampleInfo,
+                                design <- ~ group) 
+
+colData(dds)
+```
+
+Selecting for genes expressed in all samples of cell+treatment
+
+
+```{r estSizeFactors, include=FALSE, eval=FALSE}
+nrow(counts(dds))
+head( t(head(assay(dds),3)), 5)
+dds <- estimateSizeFactors(dds)
+design(dds)
+nrow(counts(dds))
+```
+
+```{r filter genes, include=TRUE, eval=FALSE}
+# Filter to keep only genes with a minimum count of 1 across all samples in each group ( cell + treatment)
+filter_count <- DEGreport::degFilter(counts = counts(dds),
+                                      metadata = as.data.frame(colData(dds)),
+                                      group = "group",
+                                      min = 1, # All samples in group must have more than expr > 0
+                                      minreads = 0) 
+dds <- dds[rownames(filter_count),]
+cat("Genes in final count matrix: ", nrow(filter_count))
+
+```
+Collapsing the replicates
+
+```{r collapsing tech replicates, include=TRUE, eval=FALSE}
+#collapse technical replicates
+ddsCollapsed <- collapseReplicates( dds,
+                                    groupby = dds$collapse_group,
+                                    run = dds$replicate )
+head( as.data.frame( colData(ddsCollapsed)[ ,c("group", "runsCollapsed") ] ), 12 )
+#confirm that the counts for the new object are equal to the summed up counts of the columns that had the same value for the grouping factor:
+original <- rowSums( counts(dds)[ , dds$collapse_group == "astrocyte1uM_syn_oligomer_ctrl_4_commercial" ] )
+all( original == counts(ddsCollapsed)[ ,"astrocyte1uM_syn_oligomer_ctrl_4_commercial" ] )
+rm(dds)
+```
+
+```{r adding the cell type prop, include=F, eval=F}
+celltype_propfile <-here("../results/deconv_scaden/allsamples_run/predictions_nsamples/scaden_pred_comb_var0_1_cells3000_samples2000.txt") 
+
+dds_t <- add_celltype_prop_2colData(celltype_propfile, ddsCollapsed)
+#head(colData(dds_t), 3) ; head(colData(ddsCollapsed))
+stopifnot( rownames(colData(dds_t)) == rownames(colData(ddsCollapsed)) )
+which(rownames(colData(dds_t)) != colnames(assay(dds_t)))
+
+colnames(assay(dds_t)) == rownames(colData(dds_t))
+
+ddsCollapsed <- dds_t
+oFile <- paste0(outPath, "/deseq2DataSet_filtered_collapsedReplicates_design_grp.rda")
+save(ddsCollapsed,file = oFile)
+
+rm(dds_t)
+```
+
+#Correcting for PCs2, 3 and 4
+```{r corr PCs 2 3 4, echo =TRUE, eval=FALSE}
+vsd <- vst(ddsCollapsed, blind=TRUE) # blind to experimental design
+#extract and include the PC axes in the deseq design
+t_pca_vsd <- prcomp(t(assay(vsd)))
+
+PC_axes <- t_pca_vsd$x[, str_c("PC", 1:4)] %>% 
+  as.data.frame() %>% 
+  tibble::rownames_to_column(var = "sample_id")
+  
+new_col_data <- merge(colData(ddsCollapsed), PC_axes, by.x ="row.names", by.y="sample_id", all.x=T )
+stopifnot(new_col_data$Row.names == colnames(assay(ddsCollapsed)))
+
+head(sampleInfo, 2)
+# Include PC axes in filter_dds colData & design
+dds_pc <- DESeqDataSetFromMatrix(countData = assay(ddsCollapsed),
+                              colData = new_col_data,
+                              design = ~ PC2 + PC3 + PC4 + group
+                              )
+design(dds_pc)
+
+stopifnot(rownames(colData(dds_pc)) == colnames(assay(dds_pc)))
+stopifnot(colData(dds_pc)$Row.names == rownames(colData(dds_pc)))
+head(colData(dds_pc))
+```
+
+<b>Note: </b> <br>
+Running DESeq() gives an error msg. This usually occurs when there is row with 0's and many interaction terms or genes with very low counts and little power. They can either be omitted or kept in by increasing the maximum iterations for Wald test (https://support.bioconductor.org/p/65091/) <br>
+As increasing the iterations to 2000 still gives 7 rows that do not converge "7 rows did not converge in beta, labelled in mcols(object)$betaConv. Use larger maxit argument with nbinomWaldTest",checking and excluding these genes from the dataset
+
+
+```{r running DE, include =TRUE, eval=FALSE}
+ #Differential expression analysis- equivalent to running DESeq(), however having to run it like this to set the iterations via the maxit for the Wald's test
+dds_pc <- estimateSizeFactors(dds_pc)
+dds_pc <- estimateDispersions(dds_pc)
+dds_pc <- nbinomWaldTest(dds_pc, maxit=2000)
+```
+
+```{r genes2excl, include =FALSE, eval=FALSE}
+genes2exlc <- rownames(dds_pc[ which(!mcols(dds_pc)$betaConv),])
+genes2exlc
+t(counts(dds_pc)[genes2exlc, ])
+#dds_pc[ which(!mcols(dds_pc)$betaConv),]
+```
+<br> <b>Excluding  7 genes </b><br>
+
+```{r excluding genes and saving deseq obj,eval=F,  echo = FALSE}
+dds_clean <- dds_pc[ which(mcols(dds_pc)$betaConv),]
+nrow(dds_pc)
+nrow(dds_clean)
+rm(ddsCollapsed)
+
+oFile <- paste0(outPath, "/deseq2_dds_clean_design_correctedPCs234_grp_dge.rda")
+save(dds_clean,file = oFile)
+
+```
+
+```{r dge results, include = FALSE, eval=FALSE}
+res<- results(dds_clean) # results tables (log2 fold changes and p-values) generated default FDR 0.1
+mcols(res, use.names=TRUE)
+summary(res) ##outliers and low counts have been removed from the FDR bounded set, by setting padj to NA 
+resultsNames(dds_clean)
+
+```
+#Extracting the results, running lfcShrinkage
+
+<b>Note: </b> This is done using contrast <br>
+contrast <- c("condition", "level_to_compare", "base_level")
+The second element is used a the base level. This translates to , condition_&lt; level_to_compare &gt;_&lt; base_level &gt; and fold change is defined as &lt;level_to_compare&gt; with &lt;base_level&gt; 
+
+```{r extracting results, include=FALSE, eval=FALSE}
+#function to extract the result for a single contrast
+deseq_extractResults <- function(dds,  base_level, comp_level, fdr_thresh, outDir ){
+  cond_comparison_done = paste0(comp_level, "_vs_", base_level)
+  contrast <- c("group", comp_level, base_level)
+  cat("\nContrast = ", contrast, "\n")
+  
+  res_pre_shrinkage <- results(dds_clean, contrast = contrast, alpha = 0.05)
+  #applying shrinkage
+  res_post_shrinkage <- lfcShrink(dds_clean, contrast = contrast, res = res_pre_shrinkage, type = "normal") 
+
+  df_pre <- as.data.frame(res_pre_shrinkage, stringsAsFactors=F)
+  df_post <- as.data.frame(res_post_shrinkage, stringsAsFactors=F)
+  names(df_post) <- paste0("lfcShrink_", names(df_post) )
+  all_res <- merge(df_pre, df_post, by ="row.names", all=T)
+  all_res$comp_vs_base <- cond_comparison_done
+  names(all_res)[1] <- "geneid"
+  rm(df_pre, df_post)
+  
+  sig_res <- all_res[ which(!is.na(all_res$padj) & (all_res$padj < fdr_thresh)), ]
+  outRda <- paste0(outDir,"/deseq2_", cond_comparison_done, ".rda")
+  save(res_pre_shrinkage, res_post_shrinkage, all_res, sig_res ,file=outRda)
+  cat("\nResults saved to : ", outRda, "\n\n") 
+  fwrite(sig_res, gsub(".rda", "_sig_genes.tsv", outRda), sep="\t", quote=F, row.names=F,  na = "NA")
+  #generating a dataframe of counts to return
+  df_counts <- data.frame(nGenes = nrow(all_res[ which(!is.na(all_res$padj)), ]), 
+                            nDeg_fdr5 =nrow(sig_res), 
+                            nDown_regulated = nrow( sig_res[which( sig_res$log2FoldChange < 0), ]), 
+                            nUp_regulated =  nrow( sig_res[which( sig_res$log2FoldChange > 0), ]), 
+                           comp_vs_base = cond_comparison_done, 
+                            stringsAsFactors=F)
+  return(df_counts)
+}
+
+call_deseq_extractResults_allGrpComb <- function(dds, sInfo, fdr_thresh, outDir ){
+  #sInfo <- sampleInfo; outDir <- outPath; fdr_threshold <- fdrCutoff; dds <- dds_clean
+  #function returns a table of counts
+
+  all_grps <- as.character( unique( sInfo$group)) #to chnage from factor
+  #all combinations of groups for comparison
+  comb_grp <- combn(x = all_grps, #vector source for combinations,
+            m = 2)  # number of elements to choose.
+  
+  comb_grp <- as.data.frame(t(comb_grp) , stringsAsFactors=F) 
+  names(comb_grp) <- c("base", "comp")
+  n_comb <- seq(1,nrow(comb_grp))
+  all_counts <- lapply(n_comb, function(y){
+    comb_grp[y, ]
+    l_base <- comb_grp[y, "base"]
+    l_comp <- comb_grp[y, "comp"]
+    
+    df_cts <- deseq_extractResults (dds, base_level =  l_base, comp_level =  l_comp, fdr_thresh, outDir )
+    return(df_cts)
+  })
+  return( rbindlist(all_counts))
+}
+
+```
+
+```{r call deseq extractResult, echo=TRUE, results= 'hide', eval=FALSE}
+fdrCutoff <- 0.05
+all_counts <- call_deseq_extractResults_allGrpComb (dds_clean, sInfo= sampleInfo, fdrCutoff, outDir=outPath )
+
+```
+
+```{r saving the counts, echo=FALSE, eval=F}
+#diplaying the counts
+fwrite(all_counts, paste0(outPath,"/degCounts_perContrast.tsv"), sep="\t", quote=F, row.names = F)
+
+```
+##Table of counts
+<b>Table displaying the counts for all pairwise comparisons of cell_treatment combinations </b>
+
+```{r disp table counts, echo=FALSE, results="asis"}
+#diplaying the counts
+all_counts <- fread(paste0(outPath,"/degCounts_perContrast.tsv"))
+kable(all_counts)
+```
+
+```{r extract 4 comp of interest,include=FALSE, eval=TRUE}
+comp2select<- c("neuron_1uM_syn_oligomer_vs_neuron_no_treatment",
+                 "astrocyte_1uM_syn_oligomer_vs_astrocyte_no_treatment",
+                 "astrocyte_neuron_1uM_syn_oligomer_vs_astrocyte_neuron_no_treatment")
+
+toMatch <- paste0(comp2select, collapse = "|")
+
+counts_subset <- all_counts[ grep(toMatch, all_counts$comp_vs_base  ),  ]
+
+```
+
+<b>Filtering on comp_vs_base </b> <br>
+Note: Down regulated – marked where the pre-Shrink lfc < 0 ( -ve lfc means the gene expression is lower in the condition B, relative to the reference(baseline) A
+
+Up regulated – where the pre-shrink lfc > 0 => the gene expression is higher in the condition B, relative to the reference(baseline)
+
+```{r table for comp of interest, echo=FALSE, results="asis"}
+kable( counts_subset)
+```
+
+```{r functions volcano plot, echo = FALSE, eval=FALSE}
+#adding the gene names lookign at the comparsion of interest
+getGeneNameBiotype <- function(ensgIDs) {
+  #get the gene names, biotypes for the genes
+  # using the file generated for the ENST ids as it also contains gene level info
+  #ensgIDs <- head(rownames( vsd))
+  txInfo <- fread("/home/ipscAstrocyteNeuron/results/salmon_quant/salmon_txiQuantification_annEns93.tsv")
+  return( unique( txInfo[ ensembl_gene_id %in% ensgIDs, .(ensembl_gene_id, external_gene_name, gene_biotype) ]) )
+}
+
+
+generateVolcanoPlot<- function(df, pvalCutoff=10e-6, fcCutoff=2, outFname, title_comparison){
+      #setting the default cut offs to match that set by of the package
+      subTitle <- paste0(title_comparison, "\nnGenes = ", nrow(df[ which(df$pvalue< pvalCutoff & df$lfcShrink_log2FoldChange > abs(fcCutoff)),]))
+      mainTitle <- paste0("log2Fold change > |", fcCutoff, "|, p-value cut-off ", pvalCutoff)
+      cat(mainTitle)
+      png(outFname, height = 10, width = 10, units = "in", res = IMAGE_DPI_COLOR)
+      print( EnhancedVolcano(df,
+                             lab = df$external_gene_name,
+                             x = 'lfcShrink_log2FoldChange',
+                             title= mainTitle ,
+                             subtitle = subTitle,
+                             y = 'pvalue',
+                             FCcutoff=fcCutoff,
+                             xlim = c(-12, 12),
+                             pCutoff = pvalCutoff,
+                             col=c('black', 'black', 'black', 'red3'), 
+                             subtitleLabSize = 10)
+      )
+      dev.off()
+      return(outFname)
+    }
+
+```
+
+```{r generate volcano plots, eval=F, include=F}
+#generate volcal plot for genes with double expression ( LFC > |1|)
+
+outVolFiles <- lapply(comp2select, function(cs){
+  print(cs)
+  #cs <- comp2select[1]
+  infile <- paste0(outPath,"/deseq2_", cs, ".rda")
+  print(infile)
+  load(infile)
+  head(all_res, 3)
+  genename <- getGeneNameBiotype(all_res$geneid)
+  nrow(all_res)
+  head(genename, 2)
+  all_res <- merge(all_res, genename, by.x = "geneid", by.y= "ensembl_gene_id", all.x=T)
+  outFname <- paste0(outPath,"/volcano_plots/", "volPlot_", cs, ".png")
+  #outFname
+  
+generateVolcanoPlot(all_res, pvalCutoff=10e-6, fcCutoff=1, outFname, title_comparison = cs)
+  return(outFname)
+})
+
+```
+
+##Volcano plots
+<br>
+Naming convention = <b>comp_level</b>_vs_<b>base_level</b>
+Down regulated – marked where the pre-Shrink lfc < 0 ( -ve lfc means the gene expression is lower in the condition B, relative to the reference(baseline) A
+Up regulated – where the pre-shrink lfc > 0 => the gene expression is higher in the condition B, relative to the reference(baseline)
+
+```{r display volcano plots, echo = TRUE, out.width="50%"}
+myimages<-list.files(paste0(outPath,"/volcano_plots/"), pattern = ".png", full.names = TRUE)
+include_graphics(myimages)
+```

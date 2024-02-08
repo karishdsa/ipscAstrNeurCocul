@@ -1,0 +1,286 @@
+---
+title: "SC19093 neuron - astrocyte co-cultures"
+subtitle: "Integrate individual sample into one Seurat data object"
+author: Stephanie Strohbuecker
+output: html_notebook
+---
+
+The following QC and pre-processing follows the workflow described in the [Seurat v3 tutorial](https://satijalab.org/seurat/v3.0/pbmc3k_tutorial.html).
+
+```{r}
+RMD_file_name <- "1-1.Integrate_samples"
+```
+
+
+## Libraries
+
+```{r}
+library(tidyverse)
+library(here)
+
+library(ggpubr)
+
+library(Seurat)
+```
+Enable parallelization with the `future` package as descibed [here](https://satijalab.org/seurat/v3.0/future_vignette.html)
+```{r}
+library(future)
+plan("multiprocess", workers = 4)
+```
+
+```{r load_data}
+# Obtain the metadata information for each of the samples
+meta_data <- openxlsx::read.xlsx(
+  here(
+    "input_data",
+    "SC19093_ASF_extended_sample_description.xlsx"
+  ),
+  startRow = 3,
+  colNames = TRUE
+) %>%
+  dplyr::slice(-(1:2)) %>%
+  dplyr::slice(-NROW(.)) %>%
+  select_if(~ !all(is.na(.))) %>%
+  filter(!is.na(sample_description)) %>%
+  dplyr::select(
+    Sample = `Sample/LIMSID`,
+    Name = `Sample/Name`,
+    sample_description,
+    sample_id = short_name
+  ) %>%
+  mutate(sample_id_t = sample_id) %>%
+  separate(sample_id_t,
+           into = c("cell_type", "treatment"),
+           sep = "_")
+
+# File path to the base Cellranger count output
+file_path_10x <- here("input_data", "Cellranger")
+
+wang_marker <- openxlsx::read.xlsx(
+  here(
+    "input_data",
+    "marker_gene_lists",
+    "wang_et_al_2018_Science",
+    "DER-21_Single_cell_markergenes_UMI.xlsx"
+  ),
+  startRow = 2
+)
+
+# Path to output and figures directories
+output <- str_c(here(), "output", RMD_file_name, sep = "/")
+
+if (!dir.exists(output)) {
+  dir.create(output, recursive = TRUE)
+}
+
+figures_out <- str_c(here(), "figures", RMD_file_name, sep = "/")
+
+if (!dir.exists(figures_out)) {
+  dir.create(figures_out, recursive = TRUE)
+}
+
+```
+
+```{r}
+sample_path_10x <-
+  dir(
+    file_path_10x,
+    recursive = TRUE,
+    pattern = "filtered_feature_bc_matrix$",
+    include.dirs = TRUE,
+    full.names = TRUE
+  )
+
+sample_path_10x <- set_names(sample_path_10x, str_extract(sample_path_10x, "GAN343A[0-9]*"))
+```
+
+
+# Read data and generate the Seurat object
+
+```{r}
+SC19093_seurat <- map2(sample_path_10x, names(sample_path_10x), function(file_path, sample_name){
+  proj_name <- meta_data %>% filter(Sample == sample_name) %>% pull(sample_id)
+  proj_name
+  data_10x <- Read10X(file_path)
+  CreateSeuratObject(counts = data_10x, project = proj_name,
+                     min.cells = 0, min.features = 0) # instead of the initial filtering done in script 02.QC_individual_samples.Rmd, remove filtering parameters to ensure that all Seurat objects contain the same number of features
+})
+SC19093_seurat
+```
+
+
+```{r change_list_names}
+SC19093_seurat <- SC19093_seurat %>% 
+  set_names(map_chr(names(SC19093_seurat), ~meta_data %>% 
+                      filter(Sample == .x) %>% 
+                      pull(sample_id)))
+
+SC19093_seurat <- SC19093_seurat[order(names(SC19093_seurat))]
+```
+
+```{r}
+SC19093_seurat <- map(SC19093_seurat, function(Seur_obj){
+  Seur_obj[["percent_mito"]] <- PercentageFeatureSet(Seur_obj, pattern = "^MT-")
+  Seur_obj
+})
+```
+
+```{r}
+# Filter low quality cells based on the cut-offs identified in script 02.QC_individual_samples.Rmd
+SC19093_seurat_filtered <- map(SC19093_seurat, function(Seur_obj) {
+  subset(Seur_obj, subset = nFeature_RNA > 200 &
+           nFeature_RNA < 3000 & percent_mito < 10)
+})
+```
+
+```{r}
+# Normalize and find variable features in each of the individual datasets
+SC19093_seurat_filtered <-
+  map(SC19093_seurat_filtered, function(Seur_obj) {
+    NormalizeData(Seur_obj)
+  })
+SC19093_seurat_filtered <-
+  map(SC19093_seurat_filtered, function(Seur_obj) {
+    FindVariableFeatures(Seur_obj,
+                         selection.method = "vst",
+                         nfeatures = 2000)
+  })
+```
+
+
+```{r}
+# Identify anchors for subsequent data integration, the dimensionality of the dataset is set to 30 by default bu may be varied over a broad range, e.g. between 10 and 50
+anchors <- FindIntegrationAnchors(object.list = SC19093_seurat_filtered, dims = 1:30)
+```
+Integrate the data using the anchors identified in the previous step. For the subsequent regression of the effect of the cell cycle set the `features.to.integrate` to all features, i.e. not just the variable ones as described [here](https://github.com/satijalab/seurat/issues/1500).
+```{r}
+data_integrated <-
+  IntegrateData(
+    anchorset = anchors,
+    dims = 1:30,
+    features.to.integrate = rownames(SC19093_seurat_filtered$astro_ctrl)
+  )
+```
+
+```{r}
+# Change the default assay from the "RNA" (raw data) to the "integrated" one; note that variable features of this assay are automatically set during IntegrateData
+DefaultAssay(data_integrated) <- "integrated"
+```
+
+```{r}
+# Seurat cell cycle genes
+s_genes <- cc.genes$s.genes
+g2m_genes <- cc.genes$g2m.genes
+```
+
+Based on the expression of the above G2M/M and S phase markes, each cell is assigned a score. These marker sets should be anticorrelated in their expression levels, and cells expressing neither are likely not cycling and in G1 phase.
+Seurat does not use the discrete classifications (G2M/G1/S) in downstream cell cycle regression ad uses instead the quantitative scores for G2M and S phasee.
+
+```{r}
+# Calculate cell cycle scores
+data_integrated <-
+  CellCycleScoring(
+    data_integrated,
+    s.features = s_genes,
+    g2m.features = g2m_genes,
+    set.ident = TRUE
+  )
+```
+
+```{r eval=FALSE, include=FALSE}
+# regress out the cell cycle effect; in this form this code chunk takes a very long time implement with future package (https://satijalab.org/seurat/v3.0/future_vignette.html)
+data_integrated <-
+  ScaleData(
+    data_integrated,
+    vars.to.regress = c("S.Score", "G2M.Score"),
+    features = rownames(data_integrated)
+  )
+```
+
+```{r eval=FALSE, include=FALSE}
+saveRDS(
+  data_integrated,
+  file = str_c(
+    output,
+    "Seurat_integrated_datasets_cell_cycle_regressed.rds",
+    sep = "/"
+  )
+)
+```
+
+```{r}
+data_integrated <- readRDS( str_c(
+    output,
+    "Seurat_integrated_datasets_cell_cycle_regressed.rds",
+    sep = "/"
+  ))
+```
+
+
+```{r}
+data_integrated <- RunPCA(data_integrated, npcs = 100, ndims.print = 1:5, nfeatures.print = 5)
+```
+
+```{r}
+data_integrated <-
+  JackStraw(data_integrated, num.replicate = 100, dims = 100)
+data_integrated <- ScoreJackStraw(data_integrated, dims = 1:100)
+```
+
+```{r, fig.width=12}
+JackStrawPlot(data_integrated, dims = 1:75)
+```
+
+
+```{r}
+ElbowPlot(data_integrated, ndims = 100)
+```
+
+```{r fig.height=12}
+DimHeatmap(data_integrated, dims = c(1:3, 43:51), cells = 500, balanced = TRUE)
+```
+
+We selected a dimensionality of 50 for the subsequent clustering.
+
+```{r}
+data_integrated <- FindNeighbors(data_integrated, reduction = "pca", dims = 1:50)
+```
+
+```{r}
+data_integrated <- FindClusters(data_integrated, resolution = c(0.4, 0.6, 0.8, 1.0, 1.2))
+```
+
+```{r}
+data_integrated <- RunUMAP(data_integrated, reduction = "pca", dims = 1:50)
+```
+
+```{r}
+data_integrated@meta.data <- data_integrated[[]] %>% separate(old.ident, into = c("cell_type", "treatment"), sep = "_")
+```
+
+```{r}
+DefaultAssay(data_integrated) <- "RNA"
+```
+
+```{r}
+data_integrated <- ScaleData(data_integrated, features = rownames(data_integrated))
+```
+
+```{r}
+DefaultAssay(data_integrated) <- "integrated"
+```
+
+
+```{r eval=FALSE, include=FALSE}
+saveRDS(
+  data_integrated,
+  file = str_c(
+    output,
+    "Seurat_integrated_datasets_cell_cycle_regressed_clustered_UMAP.rds",
+    sep = "/"
+  )
+)
+```
+
+
+

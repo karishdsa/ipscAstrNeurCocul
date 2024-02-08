@@ -1,0 +1,114 @@
+---
+title: "Pre-processing scRNA-Seq data for deconvolution using Scaden"
+
+author: Karishma D'Sa
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+
+# Scaden
+## Background
+
+## Data/file formats
+<b>File format for the sc data:</b><br>
+  1. Cell type labels file :  should be of size (n x 1), where n is the number of cells in the data. <br>
+   The single column in this file has to be labeled 'Celltype'. 
+   Extra columns may be present, as long as the 'Celltype' column which specifies the cell type labels in the correct order is present.
+<br><br>
+
+  2. Counts file : count data should be of size (n x g), where g is the number of genes and n is the number of samples. The order must be the same as for the cell type labels.
+
+<br><br>
+
+Scaden requires the normalised or raw counts of the scRNA-Seq data (https://scaden.readthedocs.io/en/latest/usage.html#file-formats). <br>
+
+<br>
+Generating the above files for the 6 samples <br>
+astrocytes - treated and untreated <br>
+neurons - treated and untreated <br>
+coculture - treated and untreated <br><br>
+<br>
+
+For the clustering, using resolution 0.25<br>
+
+
+```{r rmdName, include = F}
+RMD_file_name <- "2-2.NormalizeData_4Scaden"
+```
+
+```{r libraries,  include = F}
+suppressPackageStartupMessages(library(Seurat))
+library(here)
+
+library(tidyverse)
+library(here)
+
+library(ggpubr)
+
+
+library(DT)
+library(data.table)
+#Enable parallelization with the `future` package as descibed #(https://satijalab.org/seurat/v3.0/future_vignette.html)
+library(future)
+plan("multiprocess", workers = 4)
+
+```
+
+```{r output path, include = F }
+# Path to output and figures directories
+output <- str_c(here(), "output", RMD_file_name, sep = "/")
+
+if (!dir.exists(output)) {
+  dir.create(output, recursive = TRUE)
+}
+
+```
+
+
+# Using the integrated seurat object- with additional clustering
+
+Rawcounts of all samples from the clustering resolution 0.25 combined in a single file <br>
+Also generated a normalised counts file
+8132 cells ; 22588 genes
+
+
+```{r getting the clustering as a single file, eval = F, include = F}
+clustering_res <- 0.25
+res_prefix <- "integrated_snn_res."
+
+
+counts_df <- as.data.frame( t( as.matrix( GetAssayData(object = data_integrated, assay = "RNA", slot = "counts"))))
+
+counts_df <- counts_df[ ,colSums(counts_df[])>0]  #excluding genes with 0 counts in all cells, left with 22588
+cat("\t cCells=", nrow(counts_df)) #8132 cells
+cat("\t nGenes=", length(colnames(counts_df)))
+  
+cell_types <- data_integrated[[paste0(res_prefix, clustering_res) ]] # 8132 cells
+head(cell_types, 2)
+names(cell_types) <- "Celltype"
+
+stopifnot( identical (rownames(cell_types), rownames(counts_df)))  #checking the order of the cells matches
+
+cell_types <- data.frame(lapply(cell_types, as.character), stringsAsFactors=FALSE)
+
+cell_types$Celltype <- paste0("celltype_", cell_types$Celltype )
+  
+rownames(counts_df) <- NULL
+rownames(cell_types) <- NULL
+
+  #saving
+write_tsv(counts_df, paste0(output, "/raw_counts/ipsc_allsamples_raw_counts.txt"), quote=F)
+write_tsv(cell_types, paste0(output, "/raw_counts/ipsc_allsamples_celltypes.txt"), quote=F)
+
+```
+

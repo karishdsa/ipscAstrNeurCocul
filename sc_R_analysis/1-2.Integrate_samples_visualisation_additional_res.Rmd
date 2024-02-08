@@ -1,0 +1,822 @@
+---
+title: "SC19093 neuron - astrocyte co-cultures"
+subtitle: "Visualisation of the integrated dataset"
+author: Karishma D'Sa
+output: 
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+---
+
+<style type="text/css">
+div.main-container {
+  max-width: 6500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+
+<br>
+<b>Visualising the results for the clustering done at additional resolutions
+</b>
+
+```{r rmd name, include = F}
+RMD_file_name <- "1-2.Integrate_samples_visualisation_clus_additional_res"
+```
+
+```{r libraries, include = F }
+library(tidyverse)
+library(here)
+library(gridExtra)
+library(ggpubr)
+library(patchwork)
+
+
+suppressPackageStartupMessages(library(Seurat))
+suppressPackageStartupMessages(library(clustree))
+```
+
+
+```{r load_data, include = F, eval = T}
+# Load data generated
+data_integrated <- readRDS(
+  here(
+    "output",
+    "1-1.Integrate_samples_check_clus_additional_res",
+    "Seurat_integrated_datasets_cell_cycle_regressed_clustered_UMAP.rds"
+  )
+)
+
+# ENsure that the default assay is set to integrated
+DefaultAssay(data_integrated) <- "integrated"
+
+meta_data <- openxlsx::read.xlsx(
+  here(
+    "input_data",
+    "SC19093_ASF_extended_sample_description.xlsx"
+  ),
+  startRow = 3,
+  colNames = TRUE
+) %>%
+  dplyr::slice(-(1:2)) %>%
+  dplyr::slice(-NROW(.)) %>%
+  select_if(~ !all(is.na(.))) %>%
+  filter(!is.na(sample_description)) %>%
+  dplyr::select(
+    Sample = `Sample/LIMSID`,
+    Name = `Sample/Name`,
+    sample_description,
+    sample_id = short_name
+  ) %>%
+  mutate(sample_id_t = sample_id) %>%
+  separate(sample_id_t,
+           into = c("cell_type", "treatment"),
+           sep = "_")
+
+wang_marker <- openxlsx::read.xlsx(
+  here(
+    "input_data",
+    "marker_gene_lists",
+    "wang_et_al_2018_Science",
+    "DER-21_Single_cell_markergenes_UMI.xlsx"
+  ),
+  startRow = 2
+)
+
+zeisel_marker <- openxlsx::read.xlsx(
+  here(
+    "input_data",
+    "marker_gene_lists",
+    "zeisel_et_al_2015_Science",
+    "aaa1934_TableS1.xlsx"
+  )
+) %>% 
+   dplyr::slice(-(1))
+
+# Path to output and figures directories
+output <- str_c(here(), "output", RMD_file_name, sep = "/")
+
+if (!dir.exists(output)) {
+  dir.create(output, recursive = TRUE)
+}
+
+figures_out <- str_c(here(), "figures", RMD_file_name, sep = "/")
+
+if (!dir.exists(figures_out)) {
+  dir.create(figures_out, recursive = TRUE)
+}
+
+```
+
+```{r Prepare-metadata-for-plotting, echo=F}
+data_integrated[["full_cell_type"]] <- data_integrated[[]] %>% 
+  mutate(full_cell_type = cell_type,
+         full_cell_type = str_replace(full_cell_type, "astro", "Astrocyte"),
+         full_cell_type = str_replace(full_cell_type, "neur", "Neuron"),
+         full_cell_type = str_replace(full_cell_type, "neur.astro", "Neuron-Astrocyte co-culture")) %>% 
+  pull(full_cell_type)
+
+data_integrated[["full_sample_des"]] <- data_integrated[[]] %>% 
+  mutate(full_sample_des = str_c(full_cell_type, treatment, sep = " "),
+         full_sample_des = str_replace(full_sample_des, "ctrl", "control"),
+         full_sample_des = str_replace(full_sample_des, "syn", "treated")
+         ) %>% 
+  pull(full_sample_des)
+```
+
+
+```{r clustree visualisation, include = F, eval=F}
+#To run once - already run
+head(data_integrated[[]])
+tree_fig <- clustree(data_integrated, prefix = "integrated_snn_res.", return= "plot")
+ggsave( str_c(
+    figures_out,
+    "clustree.png",
+    sep = "/"
+  ), plot = tree_fig, width = 7, height = 12, dpi = 300 )
+
+#stability index
+tree_stab <-clustree(data_integrated, prefix = "integrated_snn_res.", node_colour = "sc3_stability")
+ggsave( str_c(
+    figures_out,
+    "clustree_stability.png",
+    sep = "/"
+  ), plot = tree_stab, width = 7, height = 12, dpi = 300 )
+
+```
+
+# Clustering at different resolutions
+
+<b>Clustering trees: a visualization for evaluating clusterings at multiple resolutions </b> <br>
+Using the R package 'clustree' https://academic.oup.com/gigascience/article/7/7/giy083/5052205#119079114 <br>
+<br>
+Note: the size of each node corresponds to the number of samples in each cluster, <br>
+ and the colour corresponds to the clustering resolution. <br>
+ The arrows are coloured according to the number of samples each cluster receives. <br>
+ The transparent ones, called the incoming node proportion,shows how samples from one group end up in another group — an indicator of cluster instability.
+
+```{r display clustree, eval=T, echo=F , out.width="50%", out.height="50%"}
+file <- str_c(here(), "figures", RMD_file_name, "clustree.png", sep = "/")
+knitr::include_graphics(file)
+
+```
+<br>Checking the clustering at resolutions - 0.1, 0.15, 0.2, 0.25( which looks the same as 0.4) <br>
+At 0.1 we see 3 clusters- corresponds to the major cell types in the experiment
+<br><br>
+<br> 
+The <b>stability index </b> measures the stability of clusters across resolutions. The
+index varies from 0 to 1, where 1 suggests that a cluster is more stable across resolutions.
+
+```{r display clustree stab, eval=T, echo=F, out.width="40%", out.height="40%"}
+file <- str_c(here(), "figures", RMD_file_name, "clustree_stability.png", sep = "/")
+knitr::include_graphics(file)
+
+```
+
+
+```{r features_of_interest, eval = F, include = F}
+variable_features <- VariableFeatures(data_integrated)
+
+astro_features <- c("GFAP",
+                    "MFGE8",
+                    "S100B",
+                    "VIM",
+                    "CNP",     # 2',3'-cyclic nucleotide 3' phosphodiesterase
+                    "SLC1A3",  # GLAST1; EAAT1
+                    "SLC1A2",  # EAAT2; GLT1
+                    "CD44",    # LHR, MDU2, MDU3, MIC4
+                    "AQP4",
+                    "EFNB1",
+                    "SOX8",    # the following markers are based on GO terms containing "astrocyte"
+                    "SOX9",
+                    "TAL1",
+                    "GCM1",
+                    "CNTF",
+                    "CCL3",
+                    "GPR183",
+                    "NR1D1",
+                    "IL6",
+                    "NF1",
+                    "MLC1",     # astrocyte marker (https://www.sciencedirect.com/science/article/pii/S2213671118305307?via%3Dihub)
+                    "ID3",
+                    "FABP7",     # BLBP, Fatty acid-binding protein, brain
+                    "ALDOC",
+                    "ALDH1L1", 
+                    "ITGA6"      # added - https://www.sciencedirect.com/science/article/pii/S0896627320303603
+                    )    
+
+astro_features <-
+  astro_features[astro_features %in% variable_features]
+
+neur_features <- c("ASCL1",
+                   "SOX2",
+                   "FGFR2",
+                   "HES5",     # hes family bHLH transcription factor 5
+                   "NES",      # nestin
+                   "ENO2",     # Enolase 2
+                   "DCX",      # doublecortin
+                   "TUBB3",
+                   "NEFM",     # neurofilament medium
+                   "MAP2",
+                   "CALB2",    # calbindin 2
+                   "GRIA2",    # glutamate ionotropic receptor AMPA type subunit 2
+                   "DLG4",     # PSD95; discs large MAGUK scaffold protein 4
+                   "TH",       # tyrosine hydroxylase
+                   "SYP",      # synaptophysin
+                   "SYN",
+                   "SYT7",
+                   "VAMP2",    # vesicle associated membrane protein 2
+                   "NCAM1",
+                   "SCN9A",
+                   "PCLO",
+                   "GABBR1",
+                   "KCNJ6",    # midbrain DAns (https://www.sciencedirect.com/science/article/pii/S2213671118305307?via%3Dihub)
+                   "NPAS4"     # added - https://www.frontiersin.org/articles/10.3389/fnins.2020.603373/full
+                   )
+
+neur_features <-
+  neur_features[neur_features %in% variable_features]
+```
+
+
+
+# Exploring the clustering at selected resolutions
+
+Using Seurat we integrated the data steming from the 6 different samples:
+<br>
+After filtering doublets and cells with a mitochondrial content greater 10%, each of the samples retains the following number of cells
+```{r number of cells, eval= T, echo = F}
+data_integrated[[]] %>% 
+  group_by(orig.ident) %>% 
+  tally(name = "nb_of_cells") %>% 
+  rename(sample_id = orig.ident)
+```
+
+<br><br>Projecting the clusters into 2 dimensions using UMAP. <br>
+<b>Generating UMAP plots for the clustering with resolution 0.1, 0.15, 0.2, 0.25 </b>
+
+
+```{r explore resolutions, include = F, eval = F}
+#To run once - already run
+# Explore resolutions
+#data_integrated@meta.data %>% 
+#        head()
+
+# Assign identity of clusters
+res_of_interest <- c(0.1, 0.15, 0.2, 0.25)
+#res_of_interest <- grep("_snn_res", colnames(data_integrated@meta.data), value = TRUE)
+
+
+plot_umap_4res <- function(res,  seurat_integrated, outPath, res_prefix="integrated_snn_res."){
+  #res <- res_of_interest[1]; seurat_integrated <- data_integrated; outPath <- figures_out
+  Idents(object = seurat_integrated) <- paste0(res_prefix, res)
+  
+  # Plot the UMAP
+  title <- paste0("Clustering at Resolution ", res)
+  cluster_plot <- DimPlot(seurat_integrated,
+          reduction = "umap",
+          label = TRUE,
+          label.size = 6) +
+          labs(subtitle = "Clustering")
+  
+    #separating the 6 samples
+    #clusters control vs treatment plots
+  clusters_ctrl_plot <- DimPlot(
+      subset(seurat_integrated, subset = treatment == "ctrl"),
+      split.by = "cell_type") +
+      labs(subtitle = "Detected clusters across the three cell culture types under control conditions")
+
+  clusters_syn_plot <- DimPlot(
+      subset(seurat_integrated, subset = treatment == "syn"),
+      reduction = "umap",
+      split.by = "cell_type") +
+      labs(subtitle = "Detected clusters across the three cell culture types with Synuclein treatment")
+  
+  
+  plots <- ggarrange( cluster_plot,
+              clusters_ctrl_plot,
+              clusters_syn_plot,
+              ncol = 3,
+              widths = c(1.5,2, 2),
+              common.legend = TRUE,
+              legend = "right")
+  ann_fig <- annotate_figure(plots, top = text_grob(title, face= "bold"))
+  ggsave(paste0(outPath, "/","clusters_", res_prefix, res, "_UMAP.png"), ann_fig, width = 25, height = 6, dpi = 300)
+  rm(plots, ann_fig)
+  
+  
+  
+  #MT gene expression plots
+  
+  mt_gene_expr_plot <-FeaturePlot(
+                seurat_integrated,
+                  features = "percent_mito",
+                split.by = "cell_type") +
+                labs(subtitle = "Percentage of mitochondrial gene expression") 
+
+   
+  ann_fig <- annotate_figure(mt_gene_expr_plot, top = text_grob(title, face= "bold"))
+  ggsave(paste0(outPath, "/","mt_gene_expr", res_prefix, res, "_UMAP.png"), ann_fig, width = 10, height = 4, dpi = 300)
+  rm(plots, ann_fig)
+
+
+  return(T)
+}
+
+vplot_umap_4res <- Vectorize(plot_umap_4res, vectorize.args = "res")
+
+umap_plots <- vplot_umap_4res(res = res_of_interest, data_integrated, outPath = figures_out)
+
+
+```
+
+## Clusters
+```{r cells,  echo =F, fig.align='center', fig.width=15}
+#cells
+sample_mixing_plot <- DimPlot(data_integrated, 
+                                reduction = "umap", 
+                                group.by = "orig.ident") +
+                        labs(subtitle = "Mixture of cells from the different samples")
+sample_by_treatment <- DimPlot(
+                    data_integrated,
+                    reduction = "umap",
+                    group.by = "orig.ident",
+                    split.by = "treatment") +
+                labs(subtitle = "Stratifying cells according to the received treatment")
+
+  ggarrange(
+    sample_mixing_plot,
+    sample_by_treatment,
+    widths = c(1.25, 1.5),
+    ncol = 2
+  )
+
+```
+<br>
+In the plots, clustering at resolution  <br>
+<b>0.1 </b>: clusters 0 and 2 look to be neuronal, cluster 1 comes up in astro and neuron single cultures - assuming these to be astroctes, should ideally not be seen in neuronal culture?<br> 
+Could the few cells in cluster 0 seen in astrocytes be precusors of neurons which have not been converted to astrocytes?  <br>
+<b>0.15  </b>: cluster 1 splits in 1 and 3( as per the clustree plot above) and in the plot below can see 3 is now neuronal. 1 is astrocytes <br>
+<b>0.20  </b>: cluster 1 further splits into 2 and so does cluster 0 ( into 0 and 4) ( clustree plot above). Basically can see more subtypes of neurons
+
+<b>Note:</b> 16 neuronal subtypes over six neocortical regions identified using single nucleus RNA-Seq. Lake et.al, Science 2016 https://www.science.org/doi/10.1126/science.aaf1204 <br>
+
+```{r displaying the UMAP plots,  echo =F, fig.align='center'}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "clusters_integrated_snn_res*", full.names = T)
+knitr::include_graphics(files) 
+```
+
+
+
+## Cell cycle and MT gene expression
+One of the confounding factors can be the cell cycle phase the cell is in at the point of fixing the cells. The cell cycle effect has been already regressed out as described in Seurat. <br>
+
+<b> Stratifying cells according to their cell cycle phase</b><br>
+```{r displ cell_cycle plots, echo =F, fig.align='center'}
+  #cell cycle 
+  DimPlot(data_integrated, reduction = "umap", group.by = "Phase", split.by = "cell_type", label=T) +
+                    labs(subtitle = "Stratifying cells according to their cell cycle phase")
+  
+ 
+```
+<br><br>
+<b> MT gene expression </b> <br>
+As seen in the previous analysis the majority of cells expresses mitochondrial genes above ~5%, apart from one cluster in which the percentage of expressed mitochondrial genes is largely close to zero 
+<br>
+
+```{r displaying the Cell cycl and MT gene expr plots,  echo =F, out.width = '50%', out.height= "50%"}
+#no cluster no. included and without cluster no. as  all plots are the same just showing one plot
+#files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "mt_gene_expr_integrated*", full.names = T)
+file <- str_c(here(), "figures", RMD_file_name, "mt_gene_exprintegrated_snn_res.0.2_UMAP.png", sep = "/")
+knitr::include_graphics(file) 
+```
+
+
+## Selected gene markers 
+
+Using the same list of selected gene markers as in the previous analysis + <br> 
+ITGA6 added as an astrocytic marker - https://www.sciencedirect.com/science/article/pii/S0896627320303603 <br>
+NPAS4 added as a neuronal marker - https://www.frontiersin.org/articles/10.3389/fnins.2020.603373/full <br>
+
+
+### Clustree plots 
+Clustree visualization of expression was done on a subset of the selected markers <br>
+
+#### Astrocytes
+<b> Expression of the GFAP and VIM </b> <br>
+```{r clustree astro markers,  echo =F, fig.show = "hold", fig.width=15, fig.height=15}
+generate_clustree_plot4genes <- function(genes, seurat_integrated){
+  #genes <- astr_genes; seurat_integrated <- data_integrated
+  plots =  lapply(genes, function(g){
+    return(clustree(seurat_integrated, prefix = "integrated_snn_res.",
+         node_colour = g, node_colour_aggr = "mean"))
+       })
+  return(plots)
+}
+  
+astr_genes <- c("GFAP", "VIM")
+res_of_interest <- c(0.1, 0.15, 0.2, 0.25)
+
+ggarrange(plotlist =   generate_clustree_plot4genes( astr_genes, data_integrated),
+  ncol = 2,
+  nrow = 1,
+  align = "hv"
+)
+
+
+```
+
+
+```{r generate selected_mkrs_dotVln_plot, eval = F,  include = F}
+#### Dotplot & violin plots
+#generating the plots and saving at different resolutions
+res_of_interest <- c(0.1, 0.15, 0.2, 0.25)
+
+plot_dot_vln_expr_4res <- function(res, marker_genes, cell_type, seurat_integrated, outPath, res_prefix="integrated_snn_res."){
+  #cell_type : indicate the cell type the markers are for e.g. neurons or astrocytes here. Added to the outfile name
+  #res <- res_of_interest[1]; seurat_integrated <- data_integrated; outPath <- figures_out
+  plot<-  DotPlot(seurat_integrated, 
+          features = marker_genes,
+          group.by = paste0(res_prefix, res),
+          col.min = 0) + 
+    ggtitle(paste0(cell_type, " marker expression\nResolution = ",res )) +
+    ylab("Cluster ID") +
+    RotatedAxis()
+  
+  ggsave(paste0(outPath, "/","marker_gene_expr", "_", cell_type, "_dot_", res_prefix, res, ".png"), plot, width = 6, height = 4, dpi = 300)
+  rm(plot)
+
+  plot <- VlnPlot(seurat_integrated, features = marker_genes, group.by = paste0(res_prefix, res), 
+                  same.y.lims = T, pt.size=0, combine = T, ncol = 1) + 
+        plot_annotation( paste0("Resolution = ",res ) ) &  
+    theme(plot.title =  element_text(size = 16, face = 'bold', hjust = 0.5 ))
+  
+    ggsave(paste0(outPath, "/","marker_gene_expr", "_", cell_type, "_vln_", res_prefix, res, ".png"), plot, width = 6, height = 22, dpi = 300)
+
+}
+
+vplot_dot_vln_expr_4res <- Vectorize(plot_dot_vln_expr_4res, vectorize.args = "res")
+
+
+DefaultAssay(data_integrated) #checking the default Assay- it is 'integrated'
+
+#for astrocytes
+DefaultAssay(data_integrated) <- "RNA"
+dot_plots <- vplot_dot_vln_expr_4res(res = res_of_interest, astro_features, cell_type="astr", data_integrated, outPath = figures_out)
+DefaultAssay(data_integrated) <- "integrated"
+```
+
+#### Neurons
+
+<b> Visualising the expression of SLC17A6, SLC17A7, NEUROD6, SYT1, BCL11B and STMN2 </b> <br><br>
+
+In the previous analysis, <br>
+SLC17A6 - was not detected .  <br>
+SLC17A7 and NEUROD6 were preferentially detected in a single cluster, while SYT1, BCL11B and STMN2 were detectable throughout the majority of the clusters <br><br>
+
+
+In the plots below too, can see these genes expressed only in a single cluster ( low no. of cells in the cluster) <br>
+Based on "SYT1", "BCL11B", "STMN2", the LHS nodes look neuronal and the right most too( different sub type?) <br>
+
+
+<br><br> 
+Source : uniprot <br>
+SLC17A6, SLC17A7 - Mediates the uptake of glutamate into synaptic vesicles at presynaptic nerve terminals of excitatory neural cells.  <br>
+NEUROD6 - Neurogenic differentiation factor 6 <br>
+Activates E box-dependent transcription in collaboration with TCF3/E47. May be a trans-acting factor involved in the development and maintenance of the mammalian nervous system. 
+<br>
+SYT1 - Calcium sensor that participates in triggering neurotransmitter release at the synapse <br>
+May have a regulatory role in the membrane interactions during trafficking of synaptic vesicles at the active zone of the synapse  <br> <br>
+
+BCL11B -  Critical Neurodevelopmental Transcription Factor (https://www.frontiersin.org/articles/10.3389/fncel.2017.00089/full)<br>
+STMN2 - Regulator of microtubule stability. When phosphorylated by MAPK8, stabilizes microtubules and consequently controls neurite length in cortical neurons. In the developing brain, negatively regulates the rate of exit from multipolar stage and retards radial migration from the ventricular zone <br>
+ neuronal growth-associated protein <br>
+<br>
+<br>
+
+Based on the above gene details, the cluster highlighted in the top row is probably more mature than the ones highlighted in the bottom row.
+<br><br>
+
+```{r cluster neuron markers,  echo =F, fig.show = "hold", fig.width=30, fig.height=25}
+neur_genes <- c("SLC17A6", "SLC17A7", "NEUROD6", "SYT1", "BCL11B", "STMN2")
+ggarrange(plotlist = generate_clustree_plot4genes( neur_genes, data_integrated) ,
+  ncol = 3,
+  nrow = ceiling((length(neur_genes))/3),
+  align = "hv"
+)
+
+
+```
+
+```{r generate neur_dot_vlnplot, eval = F,  include = F}
+#generating the dot and vln plots and saving at different resolutions
+
+DefaultAssay(data_integrated) <- "RNA"
+dot_plots <- vplot_dot_vln_expr_4res(res = res_of_interest, neur_features, cell_type= "neur", data_integrated, outPath = figures_out)
+DefaultAssay(data_integrated) <- "integrated"
+```
+
+
+```{r displaying dot plots neur,  echo =F, out.width="50%", out.height="50%"}
+#files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "marker_gene_expr_neur*", full.names = T)
+#knitr::include_graphics(files) 
+```
+<br><br>
+
+### Dot plots - Astrocytes, neurons
+Visualising all the selected marker genes <br>
+
+```{r displaying dot plots astr neur,  echo =F, out.width="25%", out.height="50%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "marker_gene_expr_*", full.names = T)
+files <- files[grep("_dot_", files)]
+
+res_of_interest <- paste0(c(1, 15, 2, 25), ".png")
+
+s_files <- lapply(res_of_interest, function(res){
+    #res <- res_of_interest[1]
+  return(files[ grep(res, files)])
+    })
+knitr::include_graphics(unlist(s_files)) 
+```
+<br>
+
+### Violin plots 
+#### Astrocytes
+```{r displaying vln plots astr ,  echo =F, out.width="25%", out.height="50%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "marker_gene_expr_astr_vln*", full.names = T)
+
+res_of_interest <- paste0(c(1, 15, 2, 25), ".png")
+
+s_files <- lapply(res_of_interest, function(res){
+    #res <- res_of_interest[1]
+  return(files[ grep(res, files)])
+    })
+knitr::include_graphics(unlist(s_files)) 
+
+```
+
+
+#### Neurons
+```{r displaying vln plots neu ,  echo =F, out.width="25%", out.height="50%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "marker_gene_expr_neur_vln*", full.names = T)
+
+res_of_interest <- paste0(c(1, 15, 2, 25), ".png")
+
+s_files <- lapply(res_of_interest, function(res){
+    #res <- res_of_interest[1]
+  return(files[ grep(res, files)])
+    })
+knitr::include_graphics(unlist(s_files)) 
+
+```
+
+
+## Published marker genes
+
+```{r published-marker-lists, eval=F, include=F}
+table(wang_marker$Cluster)
+wang_marker <- wang_marker %>% 
+  filter(Gene %in% variable_features) %>% 
+  group_by(Cluster) %>% 
+  group_split() %>% 
+  set_names(wang_marker %>% 
+              group_by(Cluster) %>% 
+              group_keys() %>% 
+              pull(Cluster)) %>% 
+  map(~ .x %>% pull(Gene))
+head(wang_marker, 3)
+wang_marker[["Excitatory"]] <- wang_marker[str_detect(names(wang_marker), "Ex")] %>% 
+  unlist() %>% unique() %>% sort()
+wang_marker[["Inhibitory"]] <- wang_marker[str_detect(names(wang_marker), "In")] %>% 
+  unlist() %>% unique() %>% sort()
+#wang_marker[["Inhibitory"]] <- wang_marker[str_detect(names(wang_marker), "In")] %>% 
+#  combine()
+
+zeisel_marker <- zeisel_marker %>%
+  map(~
+        .x[(.x %>% str_to_upper()) %in% variable_features] %>%
+        str_to_upper())
+
+# combine the astrocyte markers for Wang and Zeisel
+#published_Astrocyte_marker <- combine(zeisel_marker$Astrocyte, wang_marker$Astro) %>% 
+#  unique() #Error in align_2(x, y, along = along, join = join) : Both gtables must have names along dimension to be aligned
+
+published_Astrocyte_marker <- c(unlist(zeisel_marker$Astrocyte), unlist(wang_marker$Astro)) %>% 
+  unique()
+
+```
+As in the previous analysis, the astrocyte marker genes are filtered  to visualise only those that are among the 2000 most variable features. The astrocyte markers from both studies are combined for visualisation. <br><br>
+Wang et al. 2018 and Zeisel et al. 2015 use different neuronal subcategories for classification of neurons. Wang et al. 2018 separates neurons into excitatory neuronal markers and inhibitory neuronal markers.
+<br><br>
+Zeisel et al. 2015 list markers for S1 pyramidial neurons, CA1 pyramidal neurons and interneurons.
+
+```{r generate heat maps by resolution, include=F, eval=F }
+
+plot_heatmap_expr_4res <- function(res, marker_genes, seurat_integrated, title, outFilePrefix,plot_width= 8, plot_height= 10, res_prefix="integrated_snn_res."){
+  #res <- res_of_interest[1]; seurat_integrated <- data_integrated; outFilePrefix <- paste0(figures_out, "/pub_zei_astr_"); marker_genes <- published_Astrocyte_marker; 
+  #title <- "test"; plot_height= 11
+  group_res <- paste0(res_prefix, res)
+  plot<-  DoHeatmap(seurat_integrated,
+          features = marker_genes,
+          group.by =  group_res, label=F) +
+  labs(subtitle = paste0(title, "\nResolution = ",res ) )
+  #ggsave(paste0(outPath, "/","pub_markers_", cell_type, "_heatmap_", res_prefix, res, ".png"), plot, width = 8, height = 10, dpi = 300)
+  ggsave(paste0(outFilePrefix, "_heatmap_", res_prefix, res, ".png"), plot, width = plot_width, height = plot_height, dpi = 300)
+}
+
+vplot_heatmap_expr_4res <- Vectorize(plot_heatmap_expr_4res, vectorize.args = "res")
+
+
+```
+
+```{r published marker gene expression plots, eval = F, include = F}
+astr_plots <- vplot_heatmap_expr_4res(res = res_of_interest, published_Astrocyte_marker, data_integrated, title = "Published astrocyte marker expression", outFilePrefix = paste0(figures_out, "/pub_astr"))
+
+#Neuron marker expression
+wang_excit_plots <- vplot_heatmap_expr_4res(res = res_of_interest, wang_marker$Excitatory, data_integrated, title = "Excitatory neuron marker expression (Wang et al. 2018)", outFilePrefix = paste0(figures_out, "/pub_wang_neu_excit"),plot_width = 10, plot_height = 20)
+
+wang_inhib_plots <- vplot_heatmap_expr_4res(res = res_of_interest, marker_genes=wang_marker$Inhibitory, data_integrated, title = "Inhibitory neuron marker expression (Wang et al. 2018)", outFilePrefix = paste0(figures_out, "/pub_wang_neu_inhib"), plot_width = 10, plot_height = 20)
+
+zei_s1py_plots <- vplot_heatmap_expr_4res(res = res_of_interest, sort(zeisel_marker$S1.Pyramidal), data_integrated, title = "S1 pyramidial neuron marker expression (Zeisel et al. 2015)", outFilePrefix = paste0(figures_out, "/pub_zei_neu_S1pyramid"))
+
+zei_ca1py_plots <- vplot_heatmap_expr_4res(res = res_of_interest, sort(zeisel_marker$CA1.Pyramidal), data_integrated, title = "CA1 pyramidial neuron marker expression (Zeisel et al. 2015)", outFilePrefix = paste0(figures_out, "/pub_zei_neu_CA1pyramid"))
+
+
+zei_interneur_plots <- vplot_heatmap_expr_4res(res = res_of_interest, sort(zeisel_marker$Interneuron), data_integrated, title = "Interneuron marker expression (Zeisel et al. 2015)", outFilePrefix = paste0(figures_out, "/pub_zei_neu_inter"))
+
+```
+
+```{r getting the module score for gene lists per cell, eval= F, include = F}
+generate_module_score <- function(seurat_integrated, feat, mod_score_colname){
+  #seurat_integrated <- data_integrated
+  #feat <- list(published_Astrocyte_marker); mod_score_colname <- "published_astr"
+  seurat_integrated <- AddModuleScore(object = seurat_integrated, features = feat, ctrl = 100, name = mod_score_colname)
+  #ctrl parameter : Number of control features selected from the same bin per analyzed feature, default = 100
+  #As per https://github.com/satijalab/seurat/issues/4558, 100 is usually a safe choice. A lower value of ctrl, will mean comparing each feature in the module to a smaller set of "control" features, which could increase the noise in the score estimate. Increasing ctrl beyond 100 may not have much benefit.
+  return(seurat_integrated)
+}
+
+#head(seurat_integrated@meta.data)
+
+data_integrated <- generate_module_score(data_integrated, list(published_Astrocyte_marker), mod_score_colname = 'published_astr_mkr')
+data_integrated <- generate_module_score(data_integrated, list(wang_marker$Excitatory), mod_score_colname = 'published_excit_neur_mkr')
+data_integrated <- generate_module_score(data_integrated, list(wang_marker$Inhibitory), mod_score_colname = 'published_inhib_neur_mkr')
+data_integrated <- generate_module_score(data_integrated, list(zeisel_marker$S1.Pyramidal), mod_score_colname = 'published_s1pyramid_neur_mkr')
+data_integrated <- generate_module_score(data_integrated, list(zeisel_marker$CA1.Pyramidal), mod_score_colname = 'published_ca1pyramid_neur_mkr')
+data_integrated <- generate_module_score(data_integrated, list(zeisel_marker$Interneuron), mod_score_colname = 'published_interneur_mkr')
+head(data_integrated@meta.data)
+
+```
+```{r plot module score, eval= F, include = F}
+#mod_scores2plot_colnames <- list(grep(pattern = '^published', colnames(data_integrated@meta.data), value = TRUE))
+mod_scores2plot_cols <- grep(pattern = '^published', colnames(data_integrated@meta.data), value = TRUE)
+
+res_of_interest <- c(0.1, 0.15, 0.2, 0.25)
+
+
+plot_ridge_vln_4res <- function(res, feats, seurat_integrated, outFilePrefix, res_prefix="integrated_snn_res."){
+  #res <- res_of_interest[1]; seurat_integrated <- data_integrated; outFilePrefix <- paste0(figures_out, "/pub_markers_"); marker_genes <- published_Astrocyte_marker; 
+  #feats <- mod_scores2plot_cols
+  
+  group_res <- paste0(res_prefix, res)
+  
+  plot<-  RidgePlot(seurat_integrated, features = feats, group.by = group_res, combine = T,  ncol = 1) +
+           plot_annotation( paste0("Resolution = ",res ) ) & 
+  theme(plot.title =  element_text(size = 16, face = 'bold', hjust = 0.5 ))
+  ggsave(paste0(outFilePrefix, "_ridgeplot_", res_prefix, res, ".png"), plot, width = 6, height = 20, dpi = 300)
+
+  plot<-  VlnPlot(seurat_integrated, features = feats, group.by = group_res, combine = T,  ncol = 1, pt.size=0) +
+           plot_annotation( paste0("Resolution = ",res ) ) & 
+  theme(plot.title =  element_text(size = 16, face = 'bold', hjust = 0.5 ))
+  ggsave(paste0(outFilePrefix, "_vlnplot_", res_prefix, res, ".png"), plot, width = 6, height = 20, dpi = 300)
+
+    
+  return(T)
+}
+
+vplot_ridge_vln_4res <- Vectorize(plot_ridge_vln_4res, vectorize.args = "res")
+vln_ridge_plots <- vplot_ridge_vln_4res(res = res_of_interest, mod_scores2plot_cols, data_integrated, outFilePrefix = paste0(figures_out, "/pub_markers"))
+
+```
+```{r clustree module score,  echo =F, include =F, eval = F}
+generate_clustree_plot4feat_save <- function(feat, seurat_integrated, outFilePrefix ){
+  #copy of above generate_clustree_plot4genes, vectorised and includes saving the plots
+  #seurat_integrated <- data_integrated; outFilePrefix <- paste0(figures_out, "/pub_markers_")
+  #feat<- mod_scores2plot_cols[1]
+  plot <-  clustree(seurat_integrated, prefix = "integrated_snn_res.",
+         node_colour = feat, node_colour_aggr = "mean") 
+  f_plot <-  plot + ggtitle(gsub("published_", "", feat))  + theme(plot.title = element_text(hjust = 0.5))
+  ggsave(paste0(outFilePrefix, "_clustreeplot_", feat, ".png"), f_plot, width = 7, height = 12, dpi = 300)
+
+  return(T)
+}
+
+vplot_clustree_4feats <- Vectorize(generate_clustree_plot4feat_save, vectorize.args = "feat")
+
+mod_scores2plot_cols <- grep(pattern = '^published', colnames(data_integrated@meta.data), value = TRUE)
+
+clustree_plots <- vplot_clustree_4feats(mod_scores2plot_cols, data_integrated, outFilePrefix= paste0(figures_out, "/pub_markers") )
+
+
+```
+
+
+<br> <b>NOTE- Can further investigate if any cluster represent a subgroup of differentiated S1 pyrimidial neurons - previously checked - "PAX6", "EOMES", "NEUROD1", "TBR1", "SOX5", "EMX1" </b><br>
+
+
+Displaying the above dot plots for marker gene expression followed by the heatmaps
+and ridge plots of the module scores 
+
+### Heatmaps
+
+#### Published astrocyte marker expression
+
+```{r displaying dot astr,  echo =F, out.width="25%", out.height="25%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "marker_gene_expr_astr_dot", full.names = T)
+knitr::include_graphics(files) 
+```
+
+```{r displaying heatmap pub astr,  echo =F, out.width="25%", out.height="50%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "pub_astr", full.names = T)
+knitr::include_graphics(files) 
+```
+
+#### Excitatory neuron marker expression (Wang et al. 2018)
+
+```{r displaying dot neu,  echo =F, out.width="25%", out.height="25%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "marker_gene_expr_neur_dot", full.names = T)
+knitr::include_graphics(files) 
+```
+
+```{r displaying heatmap neu excit,  echo =F,  out.width="25%", out.height="50%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "pub_wang_neu_excit*", full.names = T)
+knitr::include_graphics(files) 
+```
+
+#### Inhibitory neuron marker expression (Wang et al. 2018)
+
+```{r displaying heatmap neu inhib,  echo =F, out.width="25%", out.height="50%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "pub_wang_neu_inhib*", full.names = T)
+knitr::include_graphics(files) 
+```
+
+#### S1 pyramidial neuron marker expression (Zeisel et al. 2015)
+
+```{r displaying heatmap neu S1 pyramidial,  echo =F,  out.width="25%", out.height="50%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "pub_zei_neu_S1pyramid*", full.names = T)
+knitr::include_graphics(files) 
+```
+
+#### CA1 pyramidial neuron marker expression (Zeisel et al. 2015)
+
+```{r displaying heatmap neu CA1 pyramidial,  echo =F,  out.width="25%", out.height="50%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "pub_zei_neu_CA1pyramid*", full.names = T)
+knitr::include_graphics(files) 
+```
+
+#### Interneuron marker expression (Zeisel et al. 2015)
+
+```{r displaying heatmap interneu,  echo =F,  out.width="25%", out.height="50%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "pub_zei_neu_inter*", full.names = T)
+knitr::include_graphics(files) 
+```
+
+### Ridge plots - Module scores
+<br><b>Note: Module scores</b>
+AddModuleScore() generates a module score per cell for a set of genes. <br>
+This score is the difference between the average expression levels of each gene set and random control genes.<br>
+A positive score would suggest that this module of genes is expressed in a particular cell more highly than would be expected, given the average expression of this module across the population.<br>
+However, there is no physical meaning to the actual scores (they are unit-less).
+
+<br>
+Computing a module score vs getting the average expression of gene set of interest for each cell type <br>
+As the module score incorporates information about a "control" set of features it is likely to be a more robust representation than simply averaging but in many cases, they will likely tell the same thing.
+
+```{r displaying ridge plots,  echo =F,  out.width="25%", out.height="25%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "pub_markers_ridge*", full.names = T)
+knitr::include_graphics(files) 
+```
+
+### Violin plots - Module scores
+```{r displaying vln plots,  echo =F,  out.width="25%", out.height="25%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "pub_markers_vln*", full.names = T)
+knitr::include_graphics(files) 
+```
+
+### Clustree plots - Module scores
+Each clustree plot shows the module scores for published marker genes set for a cell type, in each cluster across all resolutions.<br>
+
+```{r displaying clustree plots,  echo =F,  out.width="25%", out.height="25%"}
+files <- list.files(str_c(here(), "figures", RMD_file_name, sep = "/"), pattern = "pub_markers_clus*", full.names = T)
+knitr::include_graphics(files) 
+```
+
+
+

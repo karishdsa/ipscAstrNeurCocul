@@ -1,0 +1,213 @@
+---
+title: "Investigating the cell type proportions in the bulk, post deconvolution"
+author: "Karishma D'Sa"
+output: 
+  html_document:
+    code_folding: hide
+    df_print: paged
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+#Aim 
+To see if there is a significant difference in the cell type proportions in the treated vs untreated astrocytes and co-cultures. 
+
+
+```{r libraries, echo=F, include =F}
+library(here)
+library(data.table)
+library(ggplot2)
+library(DT)
+library(knitr)
+
+source(here("./R/common_sample.R"))
+source(here("./R/plot_setting.R"))
+```
+
+```{r load the data, echo=F}
+celltype_propfile <-here("../results/deconv_scaden/allsamples_run/predictions_nsamples/scaden_pred_comb_var0_1_cells3000_samples2000.txt") 
+
+ct_prop <- fread(celltype_propfile)
+setnames(ct_prop, old ="V1", new="sample")
+
+sInfo <- get_sample_info()
+sInfo$sample <- paste0(sInfo$cells, sInfo$treatment, "_", sInfo$indi)
+#head(ct_prop, 3); head(sInfo, 2);length(unique(sInfo$sample))
+sInfo <- unique( sInfo[, .(sample, cells, treatment, indi)] )
+ct_prop <- merge(ct_prop, sInfo, by = "sample", all.x=T)
+ct_prop[ treatment== "1uM_syn_oligomer", treatment := "treated"]
+ct_prop[ treatment== "no_treatment", treatment := "untreated"]
+ct_prop[ cells== "astrocyte_neuron", cells := "co-culture"]
+
+unique(ct_prop$cells)
+rm(sInfo)
+```
+
+#Results
+
+From the scRNA-seq data, celltypes 0 and 4 are likely to be astrocytic and the remaining neuronal. <br>
+<br>
+
+##Table of cell type proportions{.tabset .tabset-fade .tabset-pills}
+
+Celltype proportion*100
+
+```{r table of the cell type proportions, include =F}
+ct_prop_copy <- copy(ct_prop)
+names(ct_prop_copy) <- gsub("celltype_" , "ct_", names(ct_prop_copy))
+cols_upd <- names(ct_prop_copy)[grep("ct_", names(ct_prop_copy))] 
+
+
+ct_prop_copy[, (cols_upd) := lapply(.SD, function(x) 
+        format(x*100,  digits = 2 )), .SDcols = cols_upd]
+
+data_source <- unique(ct_prop_copy$cells)
+out <- vector(mode = "character", length = length(data_source))
+for (i in data_source) {
+  out[i] <- knit_expand(text = c("### {{stringr::str_to_title(i)}}",
+                                 "```{r, echo = FALSE}",
+                                 "ct_prop_copy[cells == '{{i}}',.(treatment, indi, ct_0,ct_1,ct_2,ct_3,ct_4,ct_5,ct_6,ct_7 )]",
+                                 "```"))
+}
+
+```
+
+`r paste(knit(text = out), collapse = '\n')`
+
+## Avg cell type proportion per cell culture and treatment
+Avg cell type proportion*100
+```{r table of the mean cell type proportions, include =F}
+
+head(ct_prop_copy, 2)
+#cols_upd <- names(ct_prop_copy)[grep("ct_", names(ct_prop_copy))]
+ct_prop_copy$cells_treatment <- paste0(ct_prop_copy$cells, "_", ct_prop_copy$treatment)
+#ct_prop_copy[, (cols_upd) := lapply(.SD, mean), .SDcols = cols_upd, by = cells_treatment ]
+ct_prop_copy[, paste0("avg_", (cols_upd)) :=lapply(.SD, function(x) 
+        mean(as.numeric(x),  digits = 2 )),  by = cells_treatment, .SDcols = cols_upd ]
+
+```
+
+```{r avg cell type prop, echo =F}
+cols2sel <- paste0( c("cells_treatment", sort( names(ct_prop_copy)[grep("avg_ct_", names(ct_prop_copy))] )), collapse = "|") 
+dt <- unique(ct_prop_copy[ , .SD, .SDcols= grep( cols2sel, names(ct_prop_copy))])
+
+DT::datatable(dt, rownames = F)
+                           
+```
+
+## Plots
+```{r plot proportions, echo=F}
+
+mdata <- mdata[ cells != "neuron",]
+ggplot( mdata, aes(x = cell_type, y = cell_type_prop*100), col= indi, group = treatment ) +
+     geom_boxplot(aes( fill= treatment), outlier.shape =  21 ) +
+  facet_wrap(~cells) +
+   ggtitle("Cell type proportions in the bulk ( deconvolution by Scaden)") +
+  theme(legend.position="bottom", legend.box = "vertical")
+
+
+```
+There seems to be a difference in the clusters 0 and 4 treated vs untreated in the cocultures<br>
+
+<b>Is there a significant difference in the cell types between the treated and untreated per cell culture? </b> <br>
+<br>
+Running a 2-tailed paired sample t-test ( it compares the means between the 2 paired groups of samples) <br> <br>
+As the n< 30, need to check if the differences of the pairs follow a normal distribution. Done using the Shapiro-Wilk test ( NULL = data are normally distributed). 
+
+
+```{r checking for significant difference in the cell type proportions, echo =F, include =F}
+#running a paired t-test  - compare the means between two related groups of samples
+#head(ct_prop, 2)
+ct_prop <- ct_prop[ cells != "neuron", ]
+cells_culture <- unique(ct_prop$cells)
+cell_types <- names(ct_prop)[grep ("celltype_", names(ct_prop))]
+ret_cells <- lapply(cells_culture, function(cel){
+  #cel <- cells_culture[1] 
+  l_cells <- ct_prop[ cells == cel,  ]
+  #head(l_cells, 2)
+  ret_celltypes <- lapply(cell_types, function(ct){
+    #ct <- cell_types[1]
+    cols2sel <-paste0( c(ct, "cells", "treatment", "indi"), collapse="|")
+    l_recs <- l_cells[ , .SD, .SDcols= grep( cols2sel, names(l_cells))]
+    ddata <- dcast.data.table(l_recs, cells+indi ~treatment, value.var = ct)
+    #Shapiro-Wilk normality test for the differences
+    shap_wilk_pval <- shapiro.test(ddata$treated - ddata$untreated)$p.value
+
+    pval <- t.test(ddata$treated, ddata$untreated, paired = TRUE, alternative = "two.sided")$p.value
+    
+    return( data.table( celltype = ct, pval_pairedttest = pval, pval_shapwilk = shap_wilk_pval))
+})
+  
+  ret_celltypes <- rbindlist(ret_celltypes)
+  ret_celltypes$cells <- cel
+
+  return(ret_celltypes)
+})
+
+
+ret_cells <- rbindlist(ret_cells)
+ret_cells[, fdr := p.adjust(pval_pairedttest, method = "BH"), by=cells] 
+
+cols_upd <- c( "pval_pairedttest", "pval_shapwilk", "fdr")
+ret_cells[, (cols_upd) := lapply(.SD, function(x) 
+        format(x, scientific = T, digits = 2 )), .SDcols = cols_upd]
+
+dres <- dcast.data.table(ret_cells, celltype~cells, value.var = c( "pval_pairedttest", "fdr", "pval_shapwilk"))
+
+```
+
+
+<br><br> <b>Shapiro-Wilk normality test p-values</b><br>
+
+pvalues > 0.05 significance level, implying the distribution of the differences are not significantly different from normal distribution. <br>
+
+```{r display shapwilk pvals, echo = F}
+cols2sel <-paste0( c("celltype", names(dres)[grep("shapwilk", names(dres))]), collapse="|")
+
+DT::datatable(dres[ , .SD, .SDcols= grep( cols2sel, names(dres))], rownames = F )
+
+```
+
+<br>
+
+<br>
+<b> Paired t-test p-values and FDR (multiple comparison test performed using Benjamini & Hochberg method, per cell culture) </b> <br>
+
+<u>All data </u>
+```{r display paired ttst pvals, echo = F}
+cols2sel <-paste0( c("celltype", names(dres)[grep("pairedttest|fdr", names(dres))]), collapse="|")
+
+DT::datatable(dres[ , .SD, .SDcols= grep( cols2sel, names(dres))], rownames = F)
+
+```
+
+
+<br><br>
+<u> Excluding cell types where proportion < 0.01 </u> <br>
+Excluding the cell types 5, 6 and 7
+```{r excl prop less that 0.0.1, include= F}
+ct2exclude<- paste0("celltype_", seq(5,7))
+
+ret_cells <- ret_cells[ !celltype %in% ct2exclude, ]
+ret_cells[, fdr := p.adjust(pval_pairedttest, method = "BH"), by=cells] 
+
+cols_upd <- c( "fdr")
+ret_cells[, (cols_upd) := lapply(.SD, function(x) 
+        format(as.numeric(x), scientific = T, digits = 2 )), .SDcols = cols_upd]
+
+dres <- dcast.data.table(ret_cells, celltype~cells, value.var = c( "pval_pairedttest", "fdr", "pval_shapwilk"))
+
+
+```
+```{r display excl celltype 5 6 7 paired ttst pvals, echo = F}
+cols2sel <-paste0( c("celltype", names(dres)[grep("pairedttest|fdr", names(dres))]), collapse="|")
+
+DT::datatable(dres[ , .SD, .SDcols= grep( cols2sel, names(dres))], rownames = F)
+
+```
+

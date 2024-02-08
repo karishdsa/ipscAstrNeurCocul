@@ -1,0 +1,159 @@
+---
+title: "SC19093 neuron - astrocyte co-cultures"
+subtitle: "Using the integrated data generated in 1-1.Integrate_samples.Rmd, to check clustering at additional resolutions"
+author: Stephanie Strohbuecker, Karishma D'Sa
+output: html_notebook
+---
+
+
+```{r}
+RMD_file_name <- "1-1.Integrate_samples_check_clus_additional_res"
+```
+
+
+## Libraries
+
+```{r}
+library(tidyverse)
+library(here)
+
+library(ggpubr)
+
+library(Seurat)
+
+```
+Enable parallelization with the `future` package as descibed [here](https://satijalab.org/seurat/v3.0/future_vignette.html)
+```{r}
+library(future)
+plan("multiprocess", workers = 4)
+```
+
+```{r load_data}
+
+# Obtain the metadata information for each of the samples
+meta_data <- openxlsx::read.xlsx(
+  here(
+    "input_data",
+    "SC19093_ASF_extended_sample_description.xlsx"
+  ),
+  startRow = 3,
+  colNames = TRUE
+) %>%
+  dplyr::slice(-(1:2)) %>%
+  dplyr::slice(-NROW(.)) %>%
+  select_if(~ !all(is.na(.))) %>%
+  filter(!is.na(sample_description)) %>%
+  dplyr::select(
+    Sample = `Sample/LIMSID`,
+    Name = `Sample/Name`,
+    sample_description,
+    sample_id = short_name
+  ) %>%
+  mutate(sample_id_t = sample_id) %>%
+  separate(sample_id_t,
+           into = c("cell_type", "treatment"),
+           sep = "_")
+
+# File path to the base Cellranger count output
+file_path_10x <- here("input_data", "Cellranger")
+
+wang_marker <- openxlsx::read.xlsx(
+  here(
+    "input_data",
+    "marker_gene_lists",
+    "wang_et_al_2018_Science",
+    "DER-21_Single_cell_markergenes_UMI.xlsx"
+  ),
+  startRow = 2
+)
+
+# Path to output and figures directories
+output <- str_c(here(), "output", RMD_file_name, sep = "/")
+
+if (!dir.exists(output)) {
+  dir.create(output, recursive = TRUE)
+}
+
+figures_out <- str_c(here(), "figures", RMD_file_name, sep = "/")
+
+if (!dir.exists(figures_out)) {
+  dir.create(figures_out, recursive = TRUE)
+}
+
+```
+
+```{r}
+#Path to integrated dataset saved in script 1-1.Integrate_samples
+inte_file <- str_c(here(), "output", "1-1.Integrate_samples", "Seurat_integrated_datasets_cell_cycle_regressed.rds", sep = "/")
+
+data_integrated <- readRDS( inte_file)
+```
+
+
+```{r}
+data_integrated <- RunPCA(data_integrated, npcs = 100, ndims.print = 1:5, nfeatures.print = 5)
+```
+
+```{r}
+data_integrated <-
+  JackStraw(data_integrated, num.replicate = 100, dims = 100)
+data_integrated <- ScoreJackStraw(data_integrated, dims = 1:100)
+```
+
+```{r, fig.width=12}
+JackStrawPlot(data_integrated, dims = 1:75)
+```
+
+
+```{r}
+ElbowPlot(data_integrated, ndims = 100)
+```
+
+```{r fig.height=12}
+DimHeatmap(data_integrated, dims = c(1:3, 43:51), cells = 500, balanced = TRUE)
+```
+
+Dimensionality of 50 had been selected for the subsequent clustering.
+
+```{r}
+data_integrated <- FindNeighbors(data_integrated, reduction = "pca", dims = 1:50)
+```
+
+```{r}
+#resolution updated
+data_integrated <- FindClusters(data_integrated, resolution = c(0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9,1.0 ))
+```
+
+```{r}
+data_integrated <- RunUMAP(data_integrated, reduction = "pca", dims = 1:50)
+```
+
+```{r}
+data_integrated@meta.data <- data_integrated[[]] %>% separate(old.ident, into = c("cell_type", "treatment"), sep = "_")
+```
+
+```{r}
+DefaultAssay(data_integrated) <- "RNA"
+```
+
+```{r}
+data_integrated <- ScaleData(data_integrated, features = rownames(data_integrated))
+```
+
+```{r}
+DefaultAssay(data_integrated) <- "integrated"
+```
+
+
+```{r eval=FALSE, include=FALSE}
+saveRDS(
+  data_integrated,
+  file = str_c(
+    output,
+    "Seurat_integrated_datasets_cell_cycle_regressed_clustered_UMAP.rds",
+    sep = "/"
+  )
+)
+```
+
+

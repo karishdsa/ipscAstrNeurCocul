@@ -1,0 +1,378 @@
+---
+title: "Disease relevance : Are the genes with significant differential expression,  splicing   implicated in PD, AD ?"
+output: 
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+#Disease genes downloaded 
+PD list of genes :<br>
+- The 43 mendelian are from PanelApp version 1.68 for Parkinson Disease and Complex Parkinsonism <br>
+- 151 GWAS genes, from Nalls et. al, 2019, were significantly associated with a possible causal change in PD risk. <br> (https://www.thelancet.com/journals/laneur/article/PIIS1474-4422(19)30320-5/fulltext) <br><br>
+
+AD : <br>
+- downloaded the 192 genes implicated by positional mapping, eQTL or chromatin interaction mapping of significant GWAS SNPs.
+- Ref : Jansen et al, Nat Gen 2019
+<br><br>
+
+Early onset dementia genes : <br>
+25 genes early onset dementia (encompassing fronto-temporal dementia and prion disease) downloaded from PanelApp  version 1.48 on 14/7/21 <br><br>
+
+```{r libs, include=FALSE, eval=T}
+library(dplyr)
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(knitr)
+library(here)
+
+source(here("./R/common_disease.R"))
+source(here("./R/common_dge.R"))
+outPath_dis <- here("../results/disease_postdeconv/")
+if(!dir.exists(outPath_dis)){
+  dir.create(outPath_dis)
+}
+```
+<br>
+Differentially spliced genes : Assigning the minimum FDR across clusters and the corresponding deltapsi to a gene.<br>
+setting the abs(dpsi) flag to 'T' if any cluster for the genehas a sig FDR and passes dpsi cutoff
+
+#PD
+##Differentially spliced genes
+###Overlap of PD genes with differentially spliced genes at FDR < 5%
+
+```{r load PD genes and check for overlap, eval=F, include=F}
+
+#load the DS genes (FDR < 5%)
+ds_recs <- fread(here("../results/leafcutter_additionalFilters_postdeconv/diff_splicing/combGrp_clust_junct_anno_singleGene.tsv"))
+head(ds_recs,2)
+
+disease <- getOverlap_gwas_mendelian_genes( unique(ds_recs$genes))
+head(disease, 2)
+
+ds_recs <- merge(ds_recs, disease, by.x="genes", by.y="symbol", all.x=T)
+
+#get the genes where fdr < 5% and abs(dpsi)>=0.1
+head(ds_recs, 2)
+genes_cocul_sig_dpsi <- unique(ds_recs[ comparison== "astrocyte_neuron_treatment_vs_no_treatment" & p.adjust < 0.05 & abs(deltapsi) >=0.1, .(genes)])
+genes_astr_sig_dpsi <- unique(ds_recs[ comparison== "astrocyte_treatment_vs_no_treatment" & p.adjust < 0.05 & abs(deltapsi) >=0.1, .(genes)])
+
+#update the sig_dpsi for all genes
+ds_recs$sig_dpsi <- F
+ds_recs[ (comparison== "astrocyte_neuron_treatment_vs_no_treatment" & p.adjust < 0.05 & (genes %in% genes_cocul_sig_dpsi$genes)), sig_dpsi:=T ]
+ds_recs[ (comparison== "astrocyte_treatment_vs_no_treatment" & p.adjust < 0.05 & genes %in% genes_astr_sig_dpsi$genes), sig_dpsi:=T ]
+table(ds_recs[, .(comparison, sig_dpsi)], exclude= NULL)
+#selecting the record with min p.adjust per gene in a comparison 
+
+min_recs <- ds_recs[ , .SD[which.min(p.adjust)], by = "comparison,genes"]
+table(min_recs[, .(comparison, sig_dpsi)], exclude= NULL)
+table(min_recs[, .(comparison, sig)], exclude= NULL)
+
+fwrite(min_recs, file= paste0(outPath_dis, "ds_minSigGene_disease_overlap.tsv"), sep = "\t", row.names = F, quote=F)
+head(min_recs)
+```
+
+```{r overlap with ds fdr sig, eval=T, echo =F}
+ds_dis <- fread(paste0(outPath_dis, "ds_minSigGene_disease_overlap.tsv"))
+unique(ds_dis[ p.adjust<0.05, sig])
+ds_dis[ p.adjust>=0.05, sig :=F]
+
+table(ds_dis[ , .(comparison, sig)])
+comps <- unique(ds_dis$comparison)
+ret <- lapply(comps, function(cmp){
+    #cmp <- comps[1]
+    cat("\n\nComparison: ", cmp)
+    recs <- ds_dis[ comparison == cmp, ]
+    df_gwas <- as.data.frame.matrix(table(recs$p.adjust <0.05, recs$gwas, exclude=NULL))
+    df_gwas$ds_sig <- rownames(df_gwas)
+    rownames(df_gwas) <- paste0( "DS_sig_",df_gwas$ds_sig)
+    df_gwas$ds_sig <- NULL
+    fisher_gwas <- fisher.test(df_gwas)$p.value
+    cat("\n\n Overlap with GWAS PD genes :\n" )
+    print(df_gwas)
+    cat("\nFisher's Exact Test p-value =",fisher_gwas)
+    cat("\n\n GWAS genes that overlap with Sig DS: \n")
+    print(recs[ p.adjust < 0.05 & gwas == "Y", genes])
+  
+    df_mendel <- as.data.frame.matrix(table(recs$p.adjust <0.05, recs$mend))
+    df_mendel$ds_sig <- rownames(df_mendel)
+    rownames(df_mendel) <- paste0( "DS_sig_",df_mendel$ds_sig)
+    df_mendel$ds_sig <- NULL
+    fisher_mendel <- fisher.test(df_mendel)$p.value
+    cat("\n\n----------------------------------------------------------") 
+    
+    cat("\n\n Overlap with Mendelian PD genes :\n" )
+    print(df_mendel)
+    cat("\nFisher's Exact Test p-value =",fisher_mendel)
+    cat("\n\n Mendelian genes that overlap with Sig DS: \n")
+    print(recs[ p.adjust < 0.05 & mend == "Y", genes])
+    
+    cat("\n\n==========================================================") 
+    return(T)
+  })
+
+
+
+```
+
+
+
+###Overlap of PD genes with differentially spliced genes at FDR < 5% & |dpsi|>=10%
+
+```{r fdr_dpsi, eval=T, echo =F}
+ds_dis <- fread(paste0(outPath_dis, "ds_minSigGene_disease_overlap.tsv"))
+ds_dis[ is.na(sig_dpsi), sig_dpsi :=F]
+#get the genes where fdr < 5% and abs(dpsi)>=0.1
+
+#update the sig_dpsi
+
+
+comps <- unique(ds_dis$comparison)
+ret <- lapply(comps, function(cmp){
+  #cmp <- comps[1]
+  cat("\n\nComparison: ", cmp)
+  recs <- ds_dis[ comparison == cmp, ]
+  df_gwas <- as.data.frame.matrix(table(recs$sig_dpsi, recs$gwas))
+  df_gwas$ds_sig <- rownames(df_gwas)
+  rownames(df_gwas) <- paste0( "DS_sig_",df_gwas$ds_sig)
+  df_gwas$ds_sig <- NULL
+  
+  fisher_gwas <- fisher.test(df_gwas)$p.value
+  cat("\n\n Overlap with GWAS PD genes :\n" )
+  print(df_gwas)
+  cat("\nFisher's Exact Test p-value =",fisher_gwas)
+  cat("\n\n GWAS genes that overlap with Sig DS: \n")
+  print(recs[ sig_dpsi == T & gwas == "Y", genes])
+
+  df_mendel <- as.data.frame.matrix(table(recs$sig_dpsi, recs$mend))
+  df_mendel$ds_sig <- rownames(df_mendel)
+  rownames(df_mendel) <- paste0( "DS_sig_",df_mendel$ds_sig)
+  df_mendel$ds_sig <- NULL
+  fisher_mendel <- fisher.test(df_mendel)$p.value
+  cat("\n\n----------------------------------------------------------") 
+  
+  cat("\n\n Overlap with Mendelian PD genes :\n" )
+  print(df_mendel)
+  cat("\nFisher's Exact Test p-value =",fisher_mendel)
+  cat("\n\n Mendelian genes that overlap with Sig DS: \n")
+  print(recs[ sig_dpsi == T & mend == "Y", genes])
+  
+  cat("\n\n==========================================================") 
+  return(T)
+})
+
+
+
+```
+
+
+##Differential gene expression
+
+```{r DGE load PD, AD genes and check for overlap, eval=F, include=F}
+
+comp <-  c("neuron_1uM_syn_oligomer_vs_neuron_no_treatment",
+                 "astrocyte_1uM_syn_oligomer_vs_astrocyte_no_treatment",
+                 "astrocyte_neuron_1uM_syn_oligomer_vs_astrocyte_neuron_no_treatment")
+
+#load the DGE genes 
+deseq_rda_path <- here("../results/dge_postdeconv/correct_PC234/")
+#all gene dge
+all_recs_coll <- get_all_genes_dge(deseq_rda_path, comp)
+dge <- unique(all_recs_coll[ , .(geneid, comp_vs_base, padj)])
+gene_sym <- getGeneNameBiotype(unique(dge$geneid), chrName = T)
+gene_sym <- gene_sym[ chromosome_name %in% c(1:22, "X", "Y", "MT"), ]
+#nrow(gene_sym) #25897
+#gene_sym[ external_gene_name == "MAPT", ] 
+#head(gene_sym,2)
+dge <- dge[ geneid %in% gene_sym$ensembl_gene_id, ]
+
+pd <- unique( getOverlap_gwas_mendelian_genes( gene_sym$external_gene_name))
+ad <- getOverlap_ad_dementia_genes( gene_sym$external_gene_name )
+
+pd <- merge(pd, gene_sym, by.x="symbol", by.y="external_gene_name", all.x=T)
+ad <- merge(ad, gene_sym, by.x="symbol", by.y="external_gene_name", all.x=T)
+
+
+dge_pd <- merge(dge, pd, by.x="geneid", by.y="ensembl_gene_id", all.x=T)
+dge_ad <- merge(dge, ad, by.x="geneid", by.y="ensembl_gene_id", all.x=T)
+
+setnames(dge_pd, old= c("comp_vs_base", "padj", "symbol"), new= c("comparison", "p.adjust", "genes"))
+
+setnames(dge_ad, old= c("comp_vs_base", "padj", "symbol"), new= c("comparison", "p.adjust", "genes"))
+
+fwrite(dge_pd, file= paste0(outPath_dis, "dge_disease_overlap.tsv"), sep = "\t", row.names = F, quote=F)
+
+fwrite(dge_ad, file= paste0(outPath_dis, "dge_ad_dementia_overlap.tsv"), sep = "\t", row.names = F, quote=F)
+
+####comb both overlaps
+ad <- unique(dge_ad[ , .(comparison,p.adjust, geneid, genes, AD, dementia)])
+pd <- unique(dge_pd[ , .(comparison, geneid, gwas, mend)])
+nrow(ad)
+head(dge, 1)
+#head(ad_pd[ is.na(p.adjust),])
+ad_pd <- merge(ad, pd, by= c("comparison", "geneid"), all=T)
+setnames(ad_pd, old= c("AD", "dementia", "gwas", "mend"), new= c("AD_gwas","early_onset_dementia", "PD_gwas", "mendelian_PD_genes"))
+
+ad_pd <- ad_pd[ p.adjust< 0.05 & (AD_gwas == "Y" | early_onset_dementia == "Y" | PD_gwas == "Y" | mendelian_PD_genes == "Y"), ]
+fwrite(ad_pd, paste0(outPath_dis, "dge_sigGene_ad_pd_overlap.tsv"), quote=F, sep="\t", row.names = F)
+
+```
+
+```{r disp PD overlap with dge sig, eval=T, echo =F}
+ds_dis <- fread(paste0(outPath_dis, "/dge_disease_overlap.tsv"))
+#head(ds_dis,2)
+#table(ds_dis$gwas, exclude = NULL)
+#ds_dis[ p.adjust>=0.05, sig :=F]
+nrow(unique(ds_dis))
+comps <- unique(ds_dis$comparison)
+ret <- lapply(comps, function(cmp){
+    cat("\n\nComparison: ", cmp)
+    recs <- (ds_dis[ comparison == cmp, ]) #19955
+    df_gwas <- as.data.frame.matrix(table(recs$p.adjust < 0.05, recs$gwas))
+    df_gwas$ds_sig <- rownames(df_gwas)
+    rownames(df_gwas) <- paste0( "DGE_sig_",df_gwas$ds_sig)
+    df_gwas$ds_sig <- NULL
+    fisher_gwas <- fisher.test(df_gwas)$p.value
+    cat("\n\n Overlap with GWAS PD genes :\n" )
+    print(df_gwas)
+    cat("\nFisher's Exact Test p-value =",fisher_gwas)
+    cat("\n\n GWAS genes that overlap with Sig DGE: \n")
+    print(recs[ p.adjust < 0.05 & gwas == "Y", genes])
+  
+    df_mendel <- as.data.frame.matrix(table(recs$p.adjust <0.05, recs$mend))
+    df_mendel$ds_sig <- rownames(df_mendel)
+    rownames(df_mendel) <- paste0( "DGE_sig_",df_mendel$ds_sig)
+    df_mendel$ds_sig <- NULL
+    fisher_mendel <- fisher.test(df_mendel)$p.value
+    cat("\n\n----------------------------------------------------------") 
+    
+    cat("\n\n Overlap with Mendelian PD genes :\n" )
+    print(df_mendel)
+    cat("\nFisher's Exact Test p-value =",fisher_mendel)
+    cat("\n\n Mendelian genes that overlap with Sig DGE: \n")
+    print(recs[ p.adjust < 0.05 & mend == "Y", genes])
+    
+    cat("\n\n==========================================================") 
+    return(T)
+  })
+
+```
+
+
+
+#AD
+```{r load AD, early onset dementia genes and check for overlap, eval=F, include=F}
+
+#load the DS genes (FDR < 5%)
+ds_recs <- fread(here("../results/leafcutter_additionalFilters_postdeconv/diff_splicing/combGrp_clust_junct_anno_singleGene.tsv"))
+head(ds_recs,2)
+class(ds_recs)
+disease <- getOverlap_ad_dementia_genes( unique(ds_recs$genes) )
+head(disease, 2)
+
+ds_recs <- merge(ds_recs, disease, by.x="genes", by.y="symbol", all.x=T)
+#selecting the record with min p.adjust per gene in a comparison
+min_recs <- ds_recs[ , .SD[which.min(p.adjust)], by = "comparison,genes"]
+fwrite(min_recs, file= paste0(outPath_dis, "ds_minSigGene_ad_dementia_overlap.tsv"), sep = "\t", row.names = F, quote=F)
+
+```
+
+##Differentially spliced - Overlap of genes implicated in AD and early onset dementia with differentially spliced genes at FDR < 5%
+
+```{r overlap of  ds fdr sig with AD and dementia, eval=T, echo =F}
+ds_dis <- fread(paste0(outPath_dis, "ds_minSigGene_ad_dementia_overlap.tsv"))
+
+comps <- unique(ds_dis$comparison)
+ret <- lapply(comps, function(cmp){
+    #cmp <- comps[1]
+    cat("\n\nComparison: ", cmp)
+    recs <- ds_dis[ comparison == cmp, ]
+    df_ad <- as.data.frame.matrix(table(recs$p.adjust <0.05, recs$AD))
+    df_ad$ds_sig <- rownames(df_ad)
+    rownames(df_ad) <- paste0( "DS_sig_",df_ad$ds_sig)
+    df_ad$ds_sig <- NULL
+    fisher_ad <- fisher.test(df_ad)$p.value
+    cat("\n\n Overlap with GWAS AD genes :\n" )
+    print(df_ad)
+    cat("\nFisher's Exact Test p-value =",fisher_ad)
+    cat("\n\n GWAS genes that overlap with Sig DS: \n")
+    print(recs[ p.adjust < 0.05 & AD == "Y", genes])
+  
+    df_mendel <- as.data.frame.matrix(table(recs$p.adjust <0.05, recs$dementia))
+    df_mendel$ds_sig <- rownames(df_mendel)
+    rownames(df_mendel) <- paste0( "DS_sig_",df_mendel$ds_sig)
+    df_mendel$ds_sig <- NULL
+    fisher_mendel <- fisher.test(df_mendel)$p.value
+    cat("\n\n----------------------------------------------------------") 
+    
+    cat("\n\n Overlap with genes implicated in rare Mendelian forms of early onset dementia  :\n" )
+    print(df_mendel)
+    cat("\nFisher's Exact Test p-value =",fisher_mendel)
+    cat("\n\n Early onset dementia genes that overlap with Sig DS: \n")
+    print(recs[ p.adjust < 0.05 & dementia == "Y", genes])
+    
+    cat("\n\n==========================================================") 
+    return(T)
+  })
+
+```
+
+##Differential gene expression
+```{r overlap of  dge with AD and dementia, eval=T, echo =F}
+ds_dis <- fread(paste0(outPath_dis, "dge_ad_dementia_overlap.tsv"))
+
+comps <- unique(ds_dis$comparison)
+ret <- lapply(comps, function(cmp){
+    #cmp <- comps[1]
+    cat("\n\nComparison: ", cmp)
+    recs <- ds_dis[ comparison == cmp, ]
+    df_ad <- as.data.frame.matrix(table(recs$p.adjust <0.05, recs$AD))
+    df_ad$ds_sig <- rownames(df_ad)
+    rownames(df_ad) <- paste0( "DGE_sig_",df_ad$ds_sig)
+    df_ad$ds_sig <- NULL
+    fisher_ad <- fisher.test(df_ad)$p.value
+    cat("\n\n Overlap with GWAS AD genes :\n" )
+    print(df_ad)
+    cat("\nFisher's Exact Test p-value =",fisher_ad)
+    cat("\n\n GWAS genes that overlap with Sig DGE: \n")
+    print(recs[ p.adjust < 0.05 & AD == "Y", genes])
+  
+    df_mendel <- as.data.frame.matrix(table(recs$p.adjust <0.05, recs$dementia))
+    df_mendel$ds_sig <- rownames(df_mendel)
+    rownames(df_mendel) <- paste0( "DS_sig_",df_mendel$ds_sig)
+    df_mendel$ds_sig <- NULL
+    fisher_mendel <- fisher.test(df_mendel)$p.value
+    cat("\n\n----------------------------------------------------------") 
+    
+    cat("\n\n Overlap with genes implicated in rare Mendelian forms of early onset dementia  :\n" )
+    print(df_mendel)
+    cat("\nFisher's Exact Test p-value =",fisher_mendel)
+    cat("\n\n Early onset dementia genes that overlap with Sig DGE: \n")
+    print(recs[ p.adjust < 0.05 & dementia == "Y", genes])
+    
+    cat("\n\n==========================================================") 
+    return(T)
+  })
+
+```
+
+
+```{r compile a file of the sig DS genes that are implicated in disease, eval=F, include=F}
+
+ds_ad <- fread(paste0(outPath_dis,"ds_minSigGene_ad_dementia_overlap.tsv"))
+ds_pd <- fread(paste0(outPath_dis, "ds_minSigGene_disease_overlap.tsv"))
+ad <- unique(ds_ad[ , .(comparison, genes, p.adjust, deltapsi,  AD, dementia)])
+pd <- unique(ds_pd[ , .(comparison, genes, gwas, mend)])
+
+ad_pd <- merge(ad, pd, by= c("comparison", "genes"), all=T)
+setnames(ad_pd, old= c("AD", "dementia", "gwas", "mend"), new= c("AD_gwas","early_onset_dementia", "PD_gwas", "mendelian_PD_genes"))
+
+ad_pd <- ad_pd[ p.adjust< 0.05 & (AD_gwas == "Y" | early_onset_dementia == "Y" | PD_gwas == "Y" | mendelian_PD_genes == "Y"), ]
+fwrite(ad_pd, paste0(outPath_dis, "ds_sigGene_ad_pd_overlap.tsv"), quote=F, sep="\t", row.names = F)
+```

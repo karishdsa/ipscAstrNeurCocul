@@ -1,0 +1,385 @@
+---
+title: "Correlation with the Leung_nature_neur_2022 data"
+author: "KD"
+date: "28/11/2022"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+---
+
+# Paper - Reference
+<br><br>
+ Leung et al,Nature Neuroscience (Oct 22) https://www.nature.com/articles/s41593-022-01180-9 - from the Kampmann lab using human iPSC derived astrocytes 
+
+<br><br>
+"In this study, we developed CRISPR interference screening in human induced pluripotent stem cell-derived astrocytes coupled to single-cell transcriptomics to systematically interrogate cytokine-induced inflammatory astrocyte reactivity"
+<br><br>
+<b>They find two distinct inflammatory states </b><br> 
+"We found that autocrine–paracrine IL-6 and IFN signaling downstream of canonical NF-κB activation drove two distinct inflammatory reactive signatures, one marked by IL-1/IL-6-responsive genes and promoted by STAT3 and the other marked by TNF/IFN-responsive-genes and inhibited by STAT3. <br>
+These signatures overlapped with those in previously published datasets, and their markers were upregulated in human brains in AD and HIE."
+<br><br>
+
+"Upon treatment with IL-1α+TNF+C1q, NTC iAstrocytes partitioned into two distinct clusters (clusters 1 and 2), with an additional small cluster (cluster 4) corresponding to cycling cells (Fig. 4a, Extended Data Fig. 5a–c and Supplementary Table 4)."
+<br>
+<br>
+
+<b> Code download</b>
+•	Code downloaded from https://kampmannlab.ucsf.edu/inflammatory-reactive-astrocyte-analysis <br>
+seurat.aggr object in dataPreprocessingAndQC/
+
+<br><br>
+Using their aligned UMAP -  as per their code in /CROPseq/analysis/reactiveStates/CROPseq_analysisOfReactiveStates.nb.html, <br>
+plot for 4a for NTC iAstrocytes was made the alignedUMAP embedding of NTC and IRAK4 iAstrocytes was chosen for showing only NTC iAstrocytes since IRAK4 KD seemed to have a minimal affect on the positioning of clusters in UMAP 
+<br>
+
+
+
+```{r rmd, include=F}
+RMD_file_name <- "3-1.leung_corr"
+```
+
+
+```{r libraries, eval=T, include=F}
+library(here)
+library(Seurat)
+library(clustifyr)
+library(glmGamPoi)
+library(tidyverse)
+library(ComplexHeatmap)
+library(knitr)
+library(DT)
+library(viridis)
+options(bitmapType='cairo')  
+```
+
+```{r output , include=F}
+output <- str_c(here(), "output", RMD_file_name, sep = "/")
+
+if (!dir.exists(output)) {
+  dir.create(output, recursive = TRUE)
+}
+
+figures_out <- str_c(here(), "figures", RMD_file_name, sep = "/")
+
+if (!dir.exists(figures_out)) {
+  dir.create(figures_out, recursive = TRUE)
+}
+
+```
+
+# Clustifyr
+Using clustifyr https://f1000research.com/articles/9-223/v2 , bioconductor package - https://bioconductor.org/packages/release/bioc/html/clustifyr.html <br>
+It aids in classifying cells from single-cell RNA sequencing data using external reference data (e.g., bulk RNA-seq, scRNA-seq, microarray, gene lists). A variety of correlation based methods and gene list enrichment methods are provided to assist cell type assignment.
+![Schematic for clustifyr input and output.](./figures/clustifyr_inp_out.PNG)
+
+
+```{r load the leung seurat object, eval=F, include=F}
+seurat.aggr <- readRDS(here('./input_data/code_leung_et_al_2022_kampmann_Nature_Neur/CROPseq/processedData/seurat.aggr.rds'))
+#head(seurat.aggr@meta.data)
+#unique(seurat.aggr@meta.data$cytokineTreatment)
+#unique(seurat.aggr@meta.data$sgRNAtarget)
+#unique(seurat.aggr@meta.data$orig.ident)
+
+```
+
+# Leung data processing
+
+```{r using their aligned UMAP, eval =F}
+#as per their code in /CROPseq/analysis/reactiveStates/CROPseq_analysisOfReactiveStates.nb.html
+#plot for 4a for NTC iAstrocytes was made the alignedUMAP embedding of NTC and IRAK4 iAstrocytes was chosen for showing only NTC iAstrocytes since IRAK4 KD seemed to have a minimal affect on the positioning of clusters in UMAP 
+alignedUMAPembeddings.list <- readRDS(here('./input_data/code_leung_et_al_2022_kampmann_Nature_Neur/CROPseq/processedData/alignedUMAPembeddings_usedForPaper.rds'))
+targets.use <- c('IRAK4') #
+targets <- targets.use
+seurat.list <- list()
+for (target in targets) {
+  
+  seurat <- seurat.aggr[, seurat.aggr$sgRNAtarget %in% c('NTC', target)]
+  seurat$cytokineTreatment <- factor(seurat$cytokineTreatment, levels = c('Vehicle', 'IL1a+TNF+C1q'))
+  seurat$sgRNAtarget <- factor(seurat$sgRNAtarget, levels = c('NTC', target))
+  seurat$perturbation <- factor(paste(seurat$sgRNAtarget, seurat$cytokineTreatment, sep = ':'), 
+                                levels = c('NTC:Vehicle', 'NTC:IL1a+TNF+C1q', 
+                                           paste(target, 'Vehicle', sep = ':'), paste(target, 'IL1a+TNF+C1q', sep = ':')))
+  
+  seurat <- seurat %>%
+    SCTransform(method = 'glmGamPoi') %>%
+    RunPCA() %>%
+    FindNeighbors(dims = 1:30) %>%
+    RunUMAP(dims = 1:30) %>%
+    FindClusters(dims = 1:30, resolution = 0.5)
+  seurat.list[[target]] <- seurat
+  
+}
+
+
+seurat.list.alignedUMAP <- list()
+
+for (target in targets.use) {
+  
+  seurat <- seurat.list[[target]]
+  originalUMAPembeddings <- seurat@reductions$umap@cell.embeddings
+  alignedUMAPembeddings <- alignedUMAPembeddings.list[[target]]
+
+  dimnames(alignedUMAPembeddings) <- dimnames(originalUMAPembeddings)
+  
+  seurat@reductions$umap@cell.embeddings <- alignedUMAPembeddings
+  seurat.list.alignedUMAP[[target]] <- seurat
+  
+}
+seurat <- seurat.list.alignedUMAP[['IRAK4']]
+seurat.ntc <- seurat[, seurat$sgRNAtarget == 'NTC']
+
+# reorder the cluster names so that the clusters have the following correspondence with cytokine treatment: 
+# 0: Vehicle
+# 1: IL1a+TNF+C1q --> IRAS1
+# 2: IL1a+TNF+C1q --> IRAS2
+# 3: Vehicle 
+# 4: IL1a+TNF+C1q
+# 5: Vehicle
+# 6: Vehicle 
+seurat.ntc$SCT_snn_res.0.5_reordered <- plyr::revalue(seurat.ntc$SCT_snn_res.0.5, c('3' = '4', '4' = '3'))
+seurat.ntc$SCT_snn_res.0.5_reordered <- factor(seurat.ntc$SCT_snn_res.0.5_reordered, levels = 0:6)
+
+p1 <- DimPlot(seurat.ntc, reduction = 'umap', group.by = 'SCT_snn_res.0.5_reordered', label = F, repel = T, pt.size = 0.2) +
+  guides(colour = guide_legend(override.aes = list(size=2))) +
+  theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank(), 
+        plot.title = element_blank(), 
+        legend.title = element_text(size = 7), legend.text = element_text(size = 7), 
+        legend.spacing = unit(8, 'points'), legend.key.height = unit(8, 'points'))
+
+p2 <- DimPlot(seurat.ntc, reduction = 'umap', group.by = 'cytokineTreatment', pt.size = 0.2) + 
+  scale_color_manual(labels = c('IL1a+TNF+C1q' = bquote('IL1'*alpha*'+TNF+C1q')), values = c('gray40', 'red4')) +
+  guides(colour = guide_legend(override.aes = list(size=2))) +
+  theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank(), 
+        plot.title = element_blank(), 
+        legend.title = element_text(size = 7), legend.text = element_text(size = 7), 
+        legend.spacing = unit(8, 'points'), legend.key.height = unit(8, 'points'))
+library(cowplot)
+plot_grid(p2, p1, ncol = 1) #generates the plots as in their paper Fig4a
+rm(alignedUMAPembeddings.list, seurat, seurat.list.alignedUMAP)
+```
+![Leung et al, Fig 4a](./input_data/code_leung_et_al_2022_kampmann_Nature_Neur/fig4a.png) <br>
+
+<br> In the UMAP fig 4a, we do not see an overlap of the cells from the vehicle treated and those treated with IL1a + TNF+ C1q for 24 hours => odd , there being no overlap as starting with the same cells. <br>
+Therefore not using their reactive clusters but instead using only their vehicle single cell data to overlap with our cluster to check for a match with our astrocytes <br><br>
+
+
+Therefore examining only the cells with vehicle treatment – to check if we have the same cells.
+
+<br>
+<br>
+Cells with Vehicle treatment are in cluster 0. 3, 5 and 6. <br>
+IN their paper - "In the absence of IL-1α+TNF+C1q, NTC iAstrocytes partitioned largely by cell cycle in uniform manifold approximation and projection (UMAP), with cluster 3 corresponding to dividing cells. 
+A small fraction (<10%) of endothelial-like or stromal-like cells was also present, corresponding to clusters 5 and 6, respectively."
+<br><br>
+Based on this it seems like cluster 0 is truly astrocytes. 
+<br>
+therefore subsetting their data to NTC:Vehicle cells and running clustifyr using their labels. 
+
+```{r running clustifyr using their labels, eval=F, include=T}
+unique(seurat.ntc$perturbation)
+unique(seurat.ntc$cytokineTreatment)
+
+seurat_veh_ntc <- subset(x = seurat.ntc, subset = (perturbation == "NTC:Vehicle"))
+unique(seurat_veh_ntc$cytokineTreatment)
+rm(seurat.aggr)
+```
+
+```{r load the astr cocult seurat object, eval=F, include=F}
+# Load data generated with additional clustering res 
+
+data_integrated <- readRDS(
+  here(
+    "output",
+    "1-1.Integrate_samples_check_clus_additional_res",
+    "Seurat_integrated_datasets_cell_cycle_regressed_clustered_UMAP.rds"
+  )
+)
+# ENsure that the default assay is set to integrated
+DefaultAssay(data_integrated) <- "integrated"
+
+clustering_res <- 0.25
+#res_prefix <- "integrated_snn_res."
+integrated_snn_res_selected <- "integrated_snn_res.0.25"
+
+# Ensure that the cell identities are defined with the correct clustering resolution
+Idents(data_integrated) <- integrated_snn_res_selected
+
+DefaultAssay(data_integrated) <- "integrated"
+
+
+meta_data <- openxlsx::read.xlsx(
+  here(
+    "input_data",
+    "SC19093_ASF_extended_sample_description.xlsx"
+  ),
+  startRow = 3,
+  colNames = TRUE
+) %>%
+  dplyr::slice(-(1:2)) %>%
+  dplyr::slice(-NROW(.)) %>%
+  select_if(~ !all(is.na(.))) %>%
+  filter(!is.na(sample_description)) %>%
+  dplyr::select(
+    Sample = `Sample/LIMSID`,
+    Name = `Sample/Name`,
+    sample_description,
+    sample_id = short_name
+  ) %>%
+  mutate(sample_id_t = sample_id) %>%
+  separate(sample_id_t,
+           into = c("cell_type", "treatment"),
+           sep = "_")
+
+data_integrated[["full_cell_type"]] <- data_integrated[[]] %>% 
+  mutate(full_cell_type = cell_type,
+         full_cell_type = str_replace(full_cell_type, "neur.astro", "Co-culture"),
+         full_cell_type = str_replace(full_cell_type, "astro", "Astrocyte"),
+         full_cell_type = str_replace(full_cell_type, "neur", "Neuron")) %>% 
+  pull(full_cell_type)
+
+data_integrated[["full_sample_des"]] <- data_integrated[[]] %>% 
+  mutate(full_sample_des = str_c(full_cell_type, treatment, sep = " "),
+         full_sample_des = str_replace(full_sample_des, "ctrl", "untreated"),
+         full_sample_des = str_replace(full_sample_des, "syn", "treated")
+         ) %>% 
+  pull(full_sample_des)
+head(data_integrated@meta.data)
+
+```
+
+# Clustifyr results
+
+```{r clustify funct notusing seurat object, eval = F}
+variable_features <- VariableFeatures(data_integrated)
+top_var_feat <- head(variable_features, 500)
+
+cluster.averages_veh_ntc <- AverageExpression(seurat_veh_ntc, assays = "SCT")
+head(cluster.averages_veh_ntc[["SCT"]])
+unique(seurat_veh_ntc$seurat_clusters)
+class(cluster.averages_veh_ntc[["SCT"]])
+ref_matrix_expr <- as.matrix(cluster.averages_veh_ntc[["SCT"]])
+
+clustify_res <- clustify(
+  input = data_integrated[["RNA"]]@data, # matrix of normalized scRNA-seq counts (or SCE/Seurat object)
+  metadata = data_integrated@meta.data, # meta.data table containing cell clusters
+  cluster_col = integrated_snn_res_selected , # name of column in meta.data containing cell clusters
+  ref_mat = ref_matrix_expr, # matrix of RNA-seq expression data for each cell type
+  query_genes = top_var_feat # list of highly varible genes identified with Seurat
+)
+
+```
+
+```{r overlap corr coef with umaps, eval=F, include =F}
+## adding UMAP embeddings in the meta data
+#adding UMAP corrordinates to the meta data
+umapCoord <- as.data.frame(Embeddings(object = data_integrated[["umap"]]))
+head(umapCoord)
+metadata_tab <- data_integrated@meta.data
+#head(metadata_tab)
+
+metadata_tab$UMI_id <- rownames(metadata_tab)
+umapCoord$UMI_id <- rownames(umapCoord)
+#stopifnot(rownames(umapCoord) == rownames(metadata_tab))
+metadata_tab <- merge.data.frame(metadata_tab,umapCoord,by = "UMI_id")
+#head(metadata_tab)
+rownames(metadata_tab) <-  metadata_tab$UMI_id
+metadata_tab$UMI_id <- NULL
+#AddMetaData(data_integrated, metadata=metadata_tab) # doesn't add it
+data_integrated@meta.data <- metadata_tab #does it!
+
+
+# Overlay correlation coefficients on UMAPs for all cell types
+corr_umaps <- plot_cor(
+  cor_mat = clustify_res,                     # matrix of correlation coefficients from clustifyr()
+  metadata = data_integrated@meta.data,              # meta.data table containing UMAP or tSNE data
+  data_to_plot = colnames(clustify_res), #[1:2], # name of cell type(s) to plot correlation coefficients
+  cluster_col = integrated_snn_res_selected    # name of column in meta.data containing cell clusters
+  
+)
+```
+
+
+```{r all clusters, eval=F, include=F}
+png(paste0(figures_out, "/clustify_corr_overlay_umap_all_clusters.png"), width = 8, height = 8, units = "in" , res = 300)
+
+plot_grid(
+  plotlist = corr_umaps,
+  rel_widths = c(0.47, 0.53, 0.47, 0.53)
+)
+dev.off()
+```
+
+```{r going with cluster 0 as their astrocytes , eval=F, include=F}
+png(paste0(figures_out, "/clustify_corr_overlay_umap_cluster0.png"), width = 6, height = 4, units = "in" , res = 300)
+
+plot_cor(
+  cor_mat = clustify_res,                     # matrix of correlation coefficients from clustifyr()
+  metadata = data_integrated@meta.data,              # meta.data table containing UMAP or tSNE data
+  data_to_plot = colnames(clustify_res)[1], #[1:2], # name of cell type(s) to plot correlation coefficients
+  cluster_col = integrated_snn_res_selected,    # name of column in meta.data containing cell clusters
+  scale_legends = c(0, 0.8)
+)
+dev.off()
+
+source(here("../scripts/plot_setting_paper.R"))
+#pdf for the paper
+pdf(paste0(figures_out, "/clustify_corr_overlay_umap_cluster0.pdf"), width = 6, height = 4)
+
+plot_cor(
+  cor_mat = clustify_res,                     # matrix of correlation coefficients from clustifyr()
+  metadata = data_integrated@meta.data,              # meta.data table containing UMAP or tSNE data
+  data_to_plot = colnames(clustify_res)[1], #[1:2], # name of cell type(s) to plot correlation coefficients
+  cluster_col = integrated_snn_res_selected,    # name of column in meta.data containing cell clusters
+  scale_legends = c(0, 0.8)
+) 
+dev.off()
+
+```
+
+```{r saving the corr matrix, eval=F, include=F}
+#correlation matrix
+clustify_res
+rownames(clustify_res) <- c( "Astrocyte cluster 1", "Neuron cluster 1", "Neuron cluster 2", "Neuron cluster 3",
+                      "Astrocyte cluster 2", "Neuron cluster 4", "Neuron cluster 5", "Neuron cluster 6")
+colnames(clustify_res) <- paste0("leung", colnames(clustify_res))
+
+write.table(clustify_res, paste0(output, "/clustify_res_corrMatrix.tsv"), sep="\t", quote=F, row.names = T)
+```
+
+```{r heatmap corr coef, eval=F, include=F}
+# Create heatmap of correlation coefficients using clustifyr() output
+png(paste0(figures_out, "/clustify_res_heatmap.png"), width = 10, height = 8, units = "in" , res = 300)
+#plot_cor_heatmap(cor_mat = clustify_res)
+plot_cor_heatmap(cor_mat = clustify_res, col = viridis(100),  show_column_dend = FALSE, show_row_dend = FALSE)
+dev.off()
+```
+
+
+## Clustifyr's correlation matrix 
+```{r displ corr matrix, eval=T, echo =F}
+clustify_res <- read.table(paste0(output, "/clustify_res_corrMatrix.tsv"), sep="\t")
+names(clustify_res) <- gsub("X", "leung_", names(clustify_res))
+DT::datatable(clustify_res)
+```
+```{r heatmap, eval=T, echo=F, out.height="80%", out.width="80%"}
+knitr::include_graphics(paste0(figures_out, "/clustify_res_heatmap.png"))
+```
+
+## Astr coculture UMAP with the Correlation coefficients
+<b> UMAP -Astr coculture clusters </b> <br>
+```{r UMAp astr cocult clusters, eval=T, echo=F , out.height="100%", out.width="100%"}
+knitr::include_graphics(paste0(here(), "/figures/1-7.Integrate_samples_visualisation_at_final_res_4paper/clustering_0.25_cluster_name.png"))
+```
+<br>
+<b>Overlay correlation coefficients on UMAP for all Leung et al's cell types </b> <br>
+```{r UMAp all leung clusters, eval=T, echo=F , out.height="75%", out.width="75%"}
+knitr::include_graphics(paste0(figures_out, "/clustify_corr_overlay_umap_all_clusters.png"))
+```
+<br><b> Cluster0 only</b> <br>
+```{r UMAp leung clusters0, eval=T, echo=F, out.height="100%", out.width="100%"}
+knitr::include_graphics(paste0(figures_out, "/clustify_corr_overlay_umap_cluster0.png"))
+```

@@ -1,0 +1,511 @@
+---
+title: "For the paper incorporating the decided color scheme  - Visualisation of astrocyte, neuronal, A1 and A2 state marker genes and ADAR, ADAR2 in the integrated dataset at clustering resolution 0.25"
+author: Karishma D'Sa
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+
+The plots have been generated using clustering at resolution 0.25 <br>
+Along the lines of R1.Summary_prelimnary_analysis <br>
+
+```{r rmdName, include = F}
+RMD_file_name <- "1-7.Integrate_samples_visualisation_at_final_res_colScheme4paper"
+```
+
+```{r libraries,  include = F}
+
+suppressPackageStartupMessages(library(Seurat))
+library(here)
+
+library(tidyverse)
+library(data.table)
+
+library(ggpubr)
+library(knitr)
+
+library(clustree)
+
+library(DT)
+options(bitmapType='cairo')  
+here()
+source(here("../scripts/plot_setting_paper.R"))
+```
+
+```{r output path, echo = F }
+# Path to output and figures directories
+output <- str_c(here(), "output", RMD_file_name, sep = "/")
+
+if (!dir.exists(output)) {
+  dir.create(output, recursive = TRUE)
+}
+
+
+figures_out <- str_c(here(), "figures", RMD_file_name, sep = "/")
+
+if (!dir.exists(figures_out)) {
+  dir.create(figures_out, recursive = TRUE)
+}
+
+```
+
+
+```{r load the data , include = F, eval=T  }
+# Load data generated with additional clustering res 
+
+data_integrated <- readRDS(
+  here(
+    "output",
+    "1-1.Integrate_samples_check_clus_additional_res",
+    "Seurat_integrated_datasets_cell_cycle_regressed_clustered_UMAP.rds"
+  )
+)
+# ENsure that the default assay is set to integrated
+DefaultAssay(data_integrated) <- "integrated"
+
+clustering_res <- 0.25
+#res_prefix <- "integrated_snn_res."
+integrated_snn_res_selected <- "integrated_snn_res.0.25"
+
+# Ensure that the cell identities are defined with the correct clustering resolution
+Idents(data_integrated) <- integrated_snn_res_selected
+
+DefaultAssay(data_integrated) <- "integrated"
+
+
+meta_data <- openxlsx::read.xlsx(
+  here(
+    "input_data",
+    "SC19093_ASF_extended_sample_description.xlsx"
+  ),
+  startRow = 3,
+  colNames = TRUE
+) %>%
+  dplyr::slice(-(1:2)) %>%
+  dplyr::slice(-NROW(.)) %>%
+  select_if(~ !all(is.na(.))) %>%
+  filter(!is.na(sample_description)) %>%
+  dplyr::select(
+    Sample = `Sample/LIMSID`,
+    Name = `Sample/Name`,
+    sample_description,
+    sample_id = short_name
+  ) %>%
+  mutate(sample_id_t = sample_id) %>%
+  separate(sample_id_t,
+           into = c("cell_type", "treatment"),
+          sep = "_")
+
+```
+
+
+```{r Prepare-metadata-for-plotting, eval=T, include=F}
+#unique(data_integrated[["cell_type"]])
+
+data_integrated[["full_cell_type"]] <- data_integrated[[]] %>% 
+  mutate(full_cell_type = cell_type,
+         full_cell_type = str_replace(full_cell_type, "neur.astro", "Co-culture"),
+         full_cell_type = str_replace(full_cell_type, "astro", "Astrocyte"),
+         full_cell_type = str_replace(full_cell_type, "neur", "Neuron")) %>% 
+  pull(full_cell_type)
+
+#unique(data_integrated[["full_cell_type"]]); unique(data_integrated[["cell_type"]])
+
+data_integrated[["full_sample_des"]] <- data_integrated[[]] %>% 
+  mutate(full_sample_des = str_c(full_cell_type, treatment, sep = " "),
+         full_sample_des = str_replace(full_sample_des, "ctrl", "untreated"),
+         full_sample_des = str_replace(full_sample_des, "syn", "treated")
+         ) %>% 
+  pull(full_sample_des)
+```
+
+# Selected Astrocyte and neuronal markers 
+
+```{r features_of_interest, echo =F}
+variable_features <- VariableFeatures(data_integrated)
+
+astro_features <- c("GFAP",
+                    "MFGE8",
+                    "S100B",
+                    "VIM",
+                    "CNP",     # 2',3'-cyclic nucleotide 3' phosphodiesterase
+                    "SLC1A3",  # GLAST1; EAAT1
+                    "SLC1A2",  # EAAT2; GLT1
+                    "CD44",    # LHR, MDU2, MDU3, MIC4
+                    "AQP4",
+                    "EFNB1",
+                    "SOX8",    # the following markers are based on GO terms containing "astrocyte"
+                    "SOX9",
+                    "TAL1",
+                    "GCM1",
+                    "CNTF",
+                    "CCL3",
+                    "GPR183",
+                    "NR1D1",
+                    "IL6",
+                    "NF1",
+                    "MLC1",     # astrocyte marker (https://www.sciencedirect.com/science/article/pii/S2213671118305307?via%3Dihub)
+                    "ID3",
+                    "FABP7",     # BLBP, Fatty acid-binding protein, brain
+                    "ALDOC",
+                    "ALDH1L1",
+                    "ITGA6"      # added - https://www.sciencedirect.com/science/article/pii/S0896627320303603
+                     )    
+# 
+ astro_features <-
+   astro_features[astro_features %in% variable_features]
+# 
+neur_features <- c("ASCL1",
+                   "SOX2",
+                   "FGFR2",
+                   "HES5",     # hes family bHLH transcription factor 5
+                   "NES",      # nestin
+                   "ENO2",     # Enolase 2
+                   "DCX",      # doublecortin
+                   "TUBB3",
+                   "NEFM",     # neurofilament medium
+                   "MAP2",
+                   "CALB2",    # calbindin 2
+                   "GRIA2",    # glutamate ionotropic receptor AMPA type subunit 2
+                   "DLG4",     # PSD95; discs large MAGUK scaffold protein 4
+                   "TH",       # tyrosine hydroxylase
+                   "SYP",      # synaptophysin
+                   "SYN",
+                   "SYT7",
+                   "VAMP2",    # vesicle associated membrane protein 2
+                   "NCAM1",
+                   "SCN9A",
+                   "PCLO",
+                   "GABBR1",
+                   "KCNJ6",    # midbrain DAns (https://www.sciencedirect.com/science/article/pii/S2213671118305307?via%3Dihub)
+                   "NPAS4"     # added - https://www.frontiersin.org/articles/10.3389/fnins.2020.603373/full
+                   )
+ neur_features <-
+   neur_features[neur_features %in% variable_features]
+
+#3 marker genes for astr and neurons
+astro_neur_features <- c("VIM",
+                    "SOX9",
+                    "FABP7",     # BLBP, Fatty acid-binding protein, brain
+                    "CALB2",    # calbindin 2
+                   "GRIA2",    # glutamate ionotropic receptor AMPA type subunit 2
+                   "NCAM1")
+
+
+
+bind_rows(
+  tibble("marker gene" = astro_neur_features[1:3], "cell type" = "Astrocyte"),
+  tibble("marker gene" = astro_neur_features[4:6], "cell type" = "Neuron")
+) %>% 
+  DT::datatable(caption = "Marker genes used for MJFF presentation.")
+
+```
+
+```{r labelling the clusters, eval=T, include=F }
+#Idents(data_integrated)
+#levels(data_integrated)
+new_cluster_ids <-  c( "Astrocyte cluster 1", "Neuron cluster 1", "Neuron cluster 2", "Neuron cluster 3",
+                      "Astrocyte cluster 2", "Neuron cluster 4", "Neuron cluster 5", "Neuron cluster 6")
+names(new_cluster_ids) <- levels(data_integrated)
+data_integrated <- RenameIdents(data_integrated, new_cluster_ids)
+head(data_integrated, 3)
+
+#unique(data_integrated$full_sample_des )
+data_integrated$full_sample_des <- factor(data_integrated$full_sample_des, levels = c("Astrocyte basal","Astrocyte αsyn-O",  "Co-culture basal","Co-culture αsyn-O", "Neuron basal", "Neuron αsyn-O"  ))
+```
+```{r setting a new order of the cluster names, eval=F, include=F}
+
+ 
+# Define an order of cluster identities
+new_levels <- c( "Astrocyte cluster 1","Astrocyte cluster 2", 
+                 "Neuron cluster 1", "Neuron cluster 2", "Neuron cluster 3", "Neuron cluster 4", "Neuron cluster 5", "Neuron cluster 6")
+
+Idents(data_integrated) <- factor(Idents(data_integrated), levels= new_levels)
+
+
+```
+
+# Cluster plots
+
+```{r cluster plots, eval=F, include=F}
+
+ cluster_plot <-
+  DimPlot(data_integrated, 
+          reduction = "umap", 
+          cols = palette_clusters
+  ) +
+  labs(title = "", x= "UMAP 1", y = "UMAP 2") + 
+  NoLegend() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+ cluster_plot <- LabelClusters(cluster_plot, id = "ident")
+
+ ggsave( str_c(
+    figures_out,
+    paste0("clustering_",clustering_res, "_cluster_name.pdf"),
+    sep = "/"
+  ), plot = cluster_plot, width = 5, height =3, dpi = 300 )
+
+ggsave( str_c(
+    figures_out,
+    paste0("clustering_",clustering_res, "_cluster_name.png"),
+    sep = "/"
+  ), plot = cluster_plot, width = 7, height = 4, dpi = 300 )
+
+```
+
+#marker genes
+```{r subet of the astr and neur markers, eval=F, include = F}
+#also including the marker genes used/looked at when doing the clustering- clustree, SS prelim Report
+
+neur_feat_subset <- c("CALB2", "MAP2" ,"GRIA2", "L1CAM", "NCAM1", "SCN9A", "KCNJ6", "SLC17A6", "SLC17A7", "NEUROD6", "SYT1", "BCL11B",  "STMN2")
+
+astro_feat_subset <- c("VIM", "SOX9", "FABP7", " SLC1A3",  "ADGRV1", "GFAP", "ID3", "S100B", "EDNRB", "AQP4", "ATPA2", "CLU", "TNC", "F3" )  
+
+astro_feat_subset <-
+   astro_feat_subset[astro_feat_subset %in% variable_features]
+
+neur_feat_subset <-
+   neur_feat_subset[neur_feat_subset %in% variable_features]
+
+head(data_integrated, 3)
+
+
+VlnPlot(data_integrated,
+          features = c(astro_feat_subset, neur_feat_subset), stack = TRUE) + theme(legend.position = "none") + labs(y="")
+
+ggsave( str_c(
+    figures_out,
+    "astr_neur_mkrs_subset_vln.png",
+    sep = "/"
+  ),width = 10, height = 7, dpi = 300 )
+
+VlnPlot(data_integrated,
+          features = c(astro_feat_subset, neur_feat_subset), stack = TRUE, col = palette_clusters) + theme(legend.position = "none") + labs(y="") +
+   theme(axis.text.y = element_text(angle = -45, hjust=1, vjust=1))  #+ scale_fill_manual(values = palette_clusters)
+
+ggsave( str_c(
+    figures_out,
+    "astr_neur_mkrs_subset_vln_vjust.png",
+    sep = "/"
+  ),width = 10, height = 7, dpi = 300 )
+```
+
+
+```{r}
+library(viridis)
+
+DotPlot(data_integrated,
+          features = c(astro_feat_subset, neur_feat_subset)) + 
+    RotatedAxis() + xlab("") + ylab("") +
+   theme(legend.position = "bottom", legend.box="vertical", legend.margin=margin()) 
+ggsave( str_c(
+    figures_out,
+    "astr_neur_mkrs_subset_dot.pdf",
+    sep = "/"
+  ),width = 8, height = 5, dpi = 300 ) #width = 10, height = 7
+
+ggsave( str_c(
+    figures_out,
+    "astr_neur_mkrs_subset_dot.png",
+    sep = "/"
+  ),width = 10, height = 7, dpi = 300 )
+
+
+```
+
+
+```{r NOT RUN function 2 generate the different plots for the marker genes, include=F, eval=F}
+
+generate_plots4features <- function( marker_genes, seurat_integrated, clust_resolution=0.25, plot_title, out_file_prefix, out_path){
+  #seurat_integrated <- data_integrated ; 
+  #marker_genes <- neur_features; plot_title <- title_plot
+  #out_path <- figures_out; out_file_prefix <- "astro_mkrs"
+  integrated_snn_res_selected <- paste0("integrated_snn_res.", clust_resolution)
+  ggarrange(
+    plotlist = map(marker_genes, function(feature) {
+      #feature <- astro_features[1]
+      FeaturePlot(
+        seurat_integrated,
+        features = feature,
+        min.cutoff = 0,
+        max.cutoff = 4
+      ) %>% 
+      LabelClusters( id = "ident") +
+        coord_fixed(ratio = 1) +
+        scale_x_discrete(breaks = NULL) +
+        scale_y_discrete(breaks = NULL) +
+        scale_colour_continuous(name = "Gene Expression\nlevel", low = "lightgrey", high = "blue") +
+        theme(plot.margin = unit(c(0.05, 0.05, 1, 0.05), "lines"), axis.title = element_text(size=12))
+    }),
+    common.legend = TRUE,
+    legend = "right",
+    ncol = 3,
+    nrow = 2,
+    align = "hv"
+  )
+  ggsave( str_c(
+      out_path,
+      paste0(out_file_prefix, "_clustering_",clustering_res, "_UMAP.png"),
+      sep = "/"
+    ),  width = 8, height = 6, dpi = 300 )
+  
+  #dot plot
+  
+  DotPlot(seurat_integrated, 
+          features = marker_genes,
+          group.by = integrated_snn_res_selected,
+          col.min = 0) + 
+    ggtitle(plot_title) +
+    ylab("Cluster ID") +
+    RotatedAxis()
+  ggsave( str_c(
+      out_path,
+      paste0(out_file_prefix, "_clustering_",clustering_res, "_dot.png"),
+      sep = "/"
+    ),  width = 10, height = 7, dpi = 300 )
+  
+}
+
+```
+
+```{r generate the plots for selected astrocyte and neuronal marker expression, include=F, eval=F }
+title_plot <- ""
+prefix <- "astro_neuro_mkrs" 
+generate_plots4features(astro_neur_features, data_integrated, clustering_res, title_plot, out_file_prefix = prefix, figures_out)
+
+```
+
+
+<b> No. cells per cluster and sample </b>
+<br> Clustering resoluction = 0.25
+
+```{r no of cells per cluster, echo=F}
+## extract meta data
+md <- data_integrated@meta.data %>% as.data.table
+# the resulting md object has one "row" per cell
+#head(md, 2)
+## count the number of cells per unique combinations of "Sample" and "seurat_clusters"
+DT::datatable( md[, .N, by = c("orig.ident", "integrated_snn_res.0.25")] %>% 
+  dcast(., orig.ident ~ integrated_snn_res.0.25, value.var = "N") )
+
+DT::datatable( md[, .N, by = c("orig.ident")]) #nCells per sample
+
+DT::datatable( md[, .N, by = c("integrated_snn_res.0.25")]) #nCells per sample
+
+DT::datatable( md[, .N, by = Idents(data_integrated)]) #nCells per sample
+
+```
+
+```{r saving the no.cells per cluster, eval=F, include = F}
+cells <- md[, .N, by = Idents(data_integrated)]
+cells[, percentage := N/sum(N) *100 ]
+setnames(cells, old= c("Idents", "N"), new = c("cluster_labels", "nCells"))         
+fwrite(cells, paste0(output, "/cells_per_cluster.tsv"), quote=F, row.names=F, sep="\t")
+```
+
+
+
+# A1, A2 state markers
+ding_neur_regen_res_2021
+```{r function 2 get A1 A2 genes, include=F}
+source(here("../scripts/common_a1_a2_mkr_genes.R")) 
+```
+
+```{r get the A1 A2 genes, echo =F}
+
+#get teh markers  
+sheetname <- "ding_neur_regen_res_2021" #  
+markerFile <- here("./input_data/marker_gene_lists/a1_a2_markers/astrocytes_A1_A2_markers_293922.xlsx")
+geneDt <- get_A1A2_markergene( xlsFile= markerFile, sheetname)
+#head(geneDt)  
+geneDt <- geneDt[, .(external_gene_name, astrocyte_state, regulation)]
+#sort
+DT::datatable(geneDt, caption = "A1, A2 marker genes used for assessment of astrocytic states in the cell clusters.")
+  
+```
+
+```{r plot, include=F ,eval=F}
+a1_up <-  geneDt[ astrocyte_state == "A1" & regulation == "up", external_gene_name]
+a1_dn <-  geneDt[ astrocyte_state == "A1" & regulation == "down", external_gene_name]
+
+a2_up <-  geneDt[ astrocyte_state == "A2" & regulation == "up", external_gene_name]
+a2_dn <-  geneDt[ astrocyte_state == "A2" & regulation == "down", external_gene_name]
+
+
+generate_module_score <- function(seurat_integrated, feat, mod_score_colname){
+  #seurat_integrated <- data_integrated
+  #feat <- list(published_Astrocyte_marker); mod_score_colname <- "published_astr"
+  seurat_integrated <- AddModuleScore(object = seurat_integrated, features = feat, ctrl = 100, name = mod_score_colname)
+  #ctrl parameter : Number of control features selected from the same bin per analyzed feature, default = 100
+  #As per https://github.com/satijalab/seurat/issues/4558, 100 is usually a safe choice. A lower value of ctrl, will mean comparing each feature in the module to a smaller set of "control" features, which could increase the noise in the score estimate. Increasing ctrl beyond 100 may not have much benefit.
+  return(seurat_integrated)
+}
+
+#head(seurat_integrated@meta.data)
+
+data_integrated <- generate_module_score(data_integrated, list(a1_up), mod_score_colname = 'mod_score_a1_up_mkr')
+data_integrated <- generate_module_score(data_integrated, list(a1_dn), mod_score_colname = 'mod_score_a1_down_mkr')
+data_integrated <- generate_module_score(data_integrated, list(a2_up), mod_score_colname = 'mod_score_a2_up_mkr')
+data_integrated <- generate_module_score(data_integrated, list(a2_dn), mod_score_colname = 'mod_score_a2_down_mkr')
+
+head(data_integrated@meta.data)
+```
+
+
+
+
+```{r A1A2 vln plot module score - Only astrocytic clusters, include=F, eval=F}
+
+mod_scores2plot_cols <- grep(pattern = '^mod_score_', colnames(data_integrated@meta.data), value = TRUE)
+
+idents2plot <- c("Astrocyte cluster 1", "Astrocyte cluster 2")
+#1x2 plots - A1 A2 up and down regulated separately
+outFilePrefix <- paste0(figures_out, "/mod_score_a1a2_astrClusters")
+head(data_integrated@meta.data, 2)
+unique(Idents(data_integrated))
+plot_up <- VlnPlot(data_integrated, 
+          features =  c(mod_scores2plot_cols[1],  mod_scores2plot_cols[3]),
+          idents = idents2plot, 
+          cols = palette_clusters, 
+          same.y.lims = T, pt.size=0, combine = T, ncol = 2)  & theme(axis.title.x = element_blank(), axis.text = element_text(size=14))
+ggsave(paste0(outFilePrefix, "_vlnplot_upReg.png"), plot_up, width = 10, height = 6, dpi = 300)
+ggsave(paste0(outFilePrefix, "_vlnplot_upReg.pdf"), plot_up, width = 10, height = 6, dpi=300)
+
+
+plot_dn <- VlnPlot(data_integrated, 
+          features =  c(mod_scores2plot_cols[2],  mod_scores2plot_cols[4]),
+          idents = idents2plot, 
+          cols = palette_clusters, 
+          same.y.lims = T, pt.size=0, combine = T, ncol = 2)  & theme(axis.title.x = element_blank(), axis.text = element_text(size=14))
+ggsave(paste0(outFilePrefix, "_vlnplot_dnReg.png"), plot_dn, width = 10, height = 6, dpi = 300)
+
+ggsave(paste0(outFilePrefix, "_vlnplot_dnReg.pdf"), plot_dn, width = 10, height = 6, dpi= 300)
+
+```
+
+```{r generate the plots for ADAR expression, include=F, eval=F }
+gene <- "ADAR" 
+#generate_plots4features("ADAR", data_integrated, clustering_res, title_plot, out_file_prefix = prefix, figures_out)
+idents2plot <- c("Astrocyte cluster 1", "Astrocyte cluster 2")
+ VlnPlot(data_integrated, 
+          features = gene ,
+         split.by = "treatment",
+          idents = idents2plot, 
+          cols = palette_clusters, 
+          same.y.lims = T, pt.size=0, combine = T, ncol = 2)  & theme(axis.title.x = element_blank(), axis.text = element_text(size=14))
+ggsave(paste0(figures_out, "/ADAR_vlnplot.png"),  width = 10, height = 6, dpi = 300)
+
+ggsave(paste0(figures_out, "/ADAR_vlnplot.pdf"),  width = 10, height = 6, dpi= 300)
+
+
+
+```

@@ -1,0 +1,519 @@
+---
+title: "Identifying the FC cutoff to be applied to the DEGs and running clusterProfiler to investigating the enriched functional profiles of the DEGs and DS genes in the astrocytes treated vs untreated and co-culture treated vs untreated "
+author: "Karishma D'Sa"
+output: 
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+
+---
+<style type="text/css">
+div.main-container {
+  max-width: 1800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+Aim : to investigate the enriched functional profiles of the DEGs and DS genes in the astrocytes treated vs untreated and co-culture treated vs untreated. <br>
+<br>
+For DGE - FDR cut-off  < 5% and a FC cut-off of 2 <br>
+DS - cut-off applied FDR < 5% and dpsi >=0.1 <br>
+<br><br>
+
+compareCluster() from the clusterProfiler package automatically calculates enriched functional profiles of each gene clusters and aggregate the results into a single object.
+<br>
+<br>
+<b>Note</b> - For the reactome pathways, clusterprofiler requires entrez id - upto 20% geneids fail to map.
+
+```{r lib, include = FALSE, eval=T}
+library(clusterProfiler)
+library(data.table)
+library(here)
+library(knitr)
+library(DT)
+library(UpSetR)
+source(here("./R/common_dge.R"))
+source(here("./R/common_clustProfiler_upsetR.R"))
+out_res_clustProf <- here( "../results/cluster_profiler/" )
+out_dge_path <- here("../results/dge_postdeconv/")
+```
+
+```{r saving the DGE , eval=F, include=F}
+#saving the DGE tested and sig in a single file
+deseq_rda_path <- paste0(out_dge_path, "correct_PC234/")
+comp_treat_notreat <- c("astrocyte_1uM_syn_oligomer_vs_astrocyte_no_treatment",
+                 "astrocyte_neuron_1uM_syn_oligomer_vs_astrocyte_neuron_no_treatment")
+
+all_recs_coll <- get_all_genes_dge(deseq_rda_path, comp_treat_notreat) 
+
+#excluding the genes that do not lie on the chrs
+gene_det <- getGeneNameBiotype(all_recs_coll$geneid, chrName=TRUE) 
+gene_det <- gene_det[ chromosome_name %in% c(1:22, "X", "Y", "MT"), ] #24,516 recs
+all_recs_coll <- all_recs_coll[ geneid %in% gene_det$ensembl_gene_id, ] #46883
+setDT(all_recs_coll)[gene_det, gene_name := external_gene_name, on = c(geneid="ensembl_gene_id") ] 
+
+rm(gene_det)
+
+all_recs_coll[ comp_vs_base == "astrocyte_1uM_syn_oligomer_vs_astrocyte_no_treatment", comparison := "astrocyte_treated_vs_untreated"]
+all_recs_coll[ comp_vs_base == "astrocyte_neuron_1uM_syn_oligomer_vs_astrocyte_neuron_no_treatment", comparison := "coculture_treated_vs_untreated"]
+all_recs_coll$comp_vs_base <- NULL
+
+fwrite(all_recs_coll, paste0(deseq_rda_path, "/dge_astr_cocult_all.tsv"), quote=F, sep="\t" )
+fwrite(all_recs_coll[ padj < 0.05, ], paste0(deseq_rda_path, "/dge_astr_cocult_sig.tsv"), quote=F, sep="\t" )
+```
+
+
+```{r load the ds  dge, eval =T, include =F}
+#DGE
+
+dge_all <- fread( paste0(out_dge_path, "correct_PC234/dge_astr_cocult_all.tsv"))
+#head(dge_all, 2)
+dge_genes <- dge_all[ padj < 0.05, ]
+#DS
+load(here("../results/leafcutter_additionalFilters_postdeconv/diff_splicing/combGrp_clust_effSize.rda"))
+
+rm(cluster_recs, intron_eff_recs)
+comp <- unique(cluster_recs_single_gene_intron$comparison)
+#cluster_recs_single_gene_intron <- cluster_recs_single_gene_intron[ status == "Success" ,] #337908
+
+cluster_recs_single_gene_intron <- cluster_recs_single_gene_intron[ status == "Success" & !(is.na(genes)),] #319199
+
+cluster_recs_single_gene_intron[, abs_deltapsi := abs(cluster_recs_single_gene_intron$deltapsi)]
+
+ds_genes <- lapply(comp, function(cmp){
+    recs <- cluster_recs_single_gene_intron[ comparison== cmp,]
+    #select genes of interest - same filter as used to select query gene
+    recs <- recs[ p.adjust < 0.05 & abs_deltapsi >= 0.1 & !is.na(genes), ]
+    min_recs <- recs[ , .SD[which.min(p.adjust)], by = "genes"] #the 
+    return(min_recs)
+})
+ds_genes <- rbindlist(ds_genes)
+table(ds_genes$comp)
+ds_genes[ comparison == "astrocyte_treatment_vs_no_treatment", comparison := "astrocyte_treated_vs_untreated"]
+ds_genes[ comparison == "astrocyte_neuron_treatment_vs_no_treatment", comparison := "coculture_treated_vs_untreated"]
+
+
+```
+
+```{r nDGE and DS, eval = F, include=F }
+#DGE
+#######
+
+#applying a lfc 
+res <- as.data.table(table(dge_all[ padj < 0.05, comparison]))
+res$threshold <- "FDR < 0.05"
+up_dn <- as.data.table(table(dge_all[ padj < 0.05 , .(reg, comparison)], exclude=NULL))
+up_dn <- dcast.data.table(up_dn, comparison~reg, value.var = "N")
+res <- merge(res, up_dn, by.x ="V1", by.y="comparison")
+
+res_fc1pt5 <- as.data.table(table(dge_all[ padj < 0.05 & abs(lfcShrink_log2FoldChange) >= 0.58, comparison]))
+res_fc1pt5$threshold <- "FDR < 0.05 & FC >=1.5 [abs(LFC) >=0.58]"
+up_dn <- as.data.table(table(dge_all[ padj < 0.05 & abs(lfcShrink_log2FoldChange) >= 0.58, .(reg, comparison)], exclude=NULL))
+up_dn <- dcast.data.table(up_dn, comparison~reg, value.var = "N")
+res_fc1pt5 <- merge(res_fc1pt5, up_dn, by.x ="V1", by.y="comparison")
+
+res_fc2 <- as.data.table(table(dge_all[ padj < 0.05 & abs(lfcShrink_log2FoldChange) >= 1, comparison]) )
+res_fc2$threshold <- "FDR < 0.05 & FC >=2 [abs(LFC) >=1]"
+up_dn <- as.data.table(table(dge_all[ padj < 0.05 & abs(lfcShrink_log2FoldChange) >= 1, .(reg, comparison)], exclude=NULL))
+up_dn <- dcast.data.table(up_dn, comparison~reg, value.var = "N")
+res_fc2 <- merge(res_fc2, up_dn, by.x ="V1", by.y="comparison")
+
+res_dge <- rbindlist(list( res, res_fc1pt5, res_fc2))
+rm( res, res_fc1pt5, res_fc2)
+
+total_dge <-  as.data.table(table(dge_all$comparison))
+setnames(total_dge, old="N", new = "total_tested")
+
+res_dge <- merge(res_dge, total_dge, by = "V1", all.x=T)
+res_dge$pct_sig <- round( (res_dge$N / res_dge$total_tested) *100, 2)
+
+
+#DS
+####
+cluster_recs_single_gene_intron <- cluster_recs_single_gene_intron[  !(is.na(genes)),]
+total_ds <-  unique(cluster_recs_single_gene_intron[ , .(genes, comparison)])
+total_ds <- as.data.table( table(total_ds$comparison))
+setnames(total_ds, old="N", new = "total_tested")
+
+ds_fdr <- cluster_recs_single_gene_intron[ p.adjust <0.05 , ]
+
+t_ds_fdr <- ds_fdr[ , .SD[which.min(p.adjust)], by = "comparison,genes"]
+res_ds_fdr <- as.data.table( table(t_ds_fdr$comparison))
+res_ds_fdr$threshold <- "FDR < 0.05"
+
+t_ds_fdr_dpsi <- cluster_recs_single_gene_intron[  p.adjust < 0.05 & abs_deltapsi >= 0.1 , ]
+t_ds_fdr_dpsi <-  t_ds_fdr_dpsi[ , .SD[which.min(p.adjust)], by = "comparison,genes"]
+res_ds_fdr_dpsi <- as.data.table( table(t_ds_fdr_dpsi$comparison))
+res_ds_fdr_dpsi$threshold <- "FDR < 0.05 & abs(dpsi) >=0.1]"
+
+rm(t_ds_fdr_dpsi, t_ds_fdr, ds_fdr)
+
+res_ds <- rbindlist(list( res_ds_fdr, res_ds_fdr_dpsi))
+rm( res_ds_fdr, res_ds_fdr_dpsi)
+
+res_ds <- merge(res_ds, total_ds, by = "V1", all.x=T)
+res_ds$pct_sig <- round( (res_ds$N / res_ds$total_tested) *100, 2)
+rm(total_dge, total_ds)
+
+res_ds$analysis <- "DS"
+res_dge$analysis <- "DGE"
+res <- rbindlist(list(res_dge, res_ds), fill = T)
+setnames(res, old=c("V1", "N"), new = c("cell_culture", "nSig"))
+
+fwrite(res, paste0(out_dge_path, "summary_counts_ds_dge_sig_varying_thresholds.tsv"), quote=F, sep="\t")
+```
+
+# DGE 
+## DEGs at varying thresholds
+
+No. of DE and DS genes significant at varying thresholds
+
+```{r display nsig DGE, eval=T, include=F}
+summ <- fread(paste0(out_dge_path, "summary_counts_ds_dge_sig_varying_thresholds.tsv")) 
+```
+
+```{r dge, eval=T, include=F}
+summ_analy <- summ[ analysis =="DGE", ] 
+
+data_source <- unique(summ_analy$threshold)
+out <- vector(mode = "character", length = length(data_source))
+for (i in data_source) {
+  out[i] <- knit_expand(text = c("<b> {{stringr::str_to_title(i)}} </b>",
+                                 "```{r, echo = FALSE}",
+                                 "summ_analy[threshold == '{{i}}',.(cell_culture, total_tested, nSig, pct_sig, up, down)]",
+                                 "```"))
+}
+
+```
+`r paste(knit(text = out), collapse = '\n')`
+
+## Volcano plots
+Fold change of 2, p-value cut-off 10e-6
+
+```{r display volcano plot , echo=F, out.width="50%", out.height="50%"}
+pngfiles <- list.files(paste0(out_dge_path, "correct_PC234/volcano_plots/"), pattern = "volPlot_astr*", full.names = T)
+knitr::include_graphics(pngfiles )
+```
+
+##Gene set enrichment analysis {.tabset .tabset-fade .tabset-pills}
+GSEA analysis 
+Input : All genes  ( sorted by descending order of avg_log2FC)
+GO, Reactome Pathways
+
+### Astrocytes
+```{r gse astr dotplot, echo=F,  out.width="50%", out.height="50%"}
+knitr::include_graphics( paste0(out_res_clustProf, "dge/go/astr_gse_go.png"))
+knitr::include_graphics( paste0(out_res_clustProf, "dge/reactome/astr_gse_reac.png"))
+```
+
+
+### Coculture
+```{r gse cocu dotplot, echo=F,  out.width="50%", out.height="50%"}
+knitr::include_graphics( paste0(out_res_clustProf, "dge/go/cocul_gse_go.png"))
+knitr::include_graphics( paste0(out_res_clustProf, "dge/reactome/cocul_gse_reac.png"))
+
+```
+
+##Overrepresentation analysis 
+
+Query genes = Genes with significant DGE at FDR < 5 % and |LFC| >= 1 (Fold change >=2)
+
+###GO {.tabset .tabset-fade .tabset-pills}
+ORA - GO
+
+#### Astrocytes
+```{r dge go astr, echo = F, out.width="50%", out.height="50%"}
+pngfiles <- list.files(paste0(out_res_clustProf, "dge/go/"), pattern= "*.png", full.names = T)
+
+png_go <- pngfiles[grep("GO", pngfiles)]
+png_go <- png_go[grep("simp", png_go)]
+
+knitr::include_graphics(png_go[ grep("astr", png_go)] )
+```
+
+#### Coculture
+```{r dge go cocul, echo = F, out.width="50%", out.height="50%"}
+
+knitr::include_graphics(png_go[ grep("cocul", png_go)] )
+```
+
+## Enrichments in up and down regulated genes 
+Running clusterCompare() -ORA to compare the up and down regulated genes in the DEGs - astrocytes treated vs untreated, cocultures untreated
+
+
+### Fold change >=2 {.tabset .tabset-fade .tabset-pills}
+
+#### Reactome Pathways
+```{r up down astr cocul reac enrich plot, echo = F}
+png_file <- paste0(out_res_clustProf, "dge/reactome/bothcult_clust_cmp_enrichPath_up_down_reg.png")
+knitr::include_graphics(png_file )
+
+```
+
+```{r up down astr cocul reac enrich_table, echo=F }
+dt_enrich <- fread( gsub(".png", ".tsv", png_file) )
+#head(dt_enrich, 2)
+data_source <- unique(dt_enrich$Cluster)
+out <- vector(mode = "character", length = length(data_source))
+for (i in data_source) {
+  out[i] <- knit_expand(text = c("#### {{stringr::str_to_title(i)}}",
+                                 "```{r, echo = FALSE}",
+                                 "dt_enrich[Cluster == '{{i}}',.(ID, Description, p.adjust, GeneRatio, BgRatio, geneID)]",
+                                 "```"))
+}
+```
+
+`r paste(knit(text = out), collapse = '\n')`
+
+#### GO
+```{r up down astr cocul reac enrich go, echo = F}
+png_file <- list.files(paste0(out_res_clustProf, "dge/go/"), pattern = "bothcult_clust_cmp_enrichGO_up_dn_reg*", full.names=T)
+png_file <- png_file[ grep("png", png_file)]
+knitr::include_graphics(png_file )
+
+```
+
+### Fold change 1.5, 2.5 and 3 
+#### Reactome pathways {.tabset .tabset-fade .tabset-pills}
+
+```{r up down varying FC astr cocul reac enrich plot, echo = F,  results='asis', eval=T, comment=""}
+abs_LFC_cutoff <-c(0.6, 1.3, 1.6) #FC, 1.5, 2.5, 3
+cat("\n\n")
+for (f in abs_LFC_cutoff) {
+      #f <- abs_LFC_cutoff[1]
+      png_file <- paste0(out_res_clustProf, "dge_absLFC", sub("\\.", "pt", f) , "/reactome/bothcult_clust_cmp_enrichPath_up_down_reg.png")
+      
+      cat(sprintf("##### abs LFC %s \n", f)) #tab for comparison
+      #cat(knitr::include_graphics(f))  
+      cat(sprintf("![](%s)", png_file))
+      cat('\n', '<br>', '\n\n')
+      
+  }
+```
+
+#### GO {.tabset .tabset-fade .tabset-pills}
+
+```{r up down varying FC astr cocul GO enrich plot, echo = F,  results='asis', eval=T, comment=""}
+abs_LFC_cutoff <-c(0.6, 1.3, 1.6) #FC, 1.5, 2.5, 3
+cat("\n\n")
+for (f in abs_LFC_cutoff){
+      #f <- abs_LFC_cutoff[1]
+      png_files <- list.files( paste0(out_res_clustProf, "dge_absLFC", sub("\\.", "pt", f) , "/go/"), pattern="bothcult_clust_cmp_enrichGO_up_dn_reg*", full.names = T)
+      png_files <- png_files[grep("png", png_files)]
+      png_files <- png_files[grep("simplify", png_files, invert = T)]
+      cat(sprintf("##### abs LFC %s \n", f)) #tab for comparison
+      #cat(knitr::include_graphics(f))  
+      cat(sprintf("![](%s)", png_files[grep("BP", png_files)]))
+      cat(sprintf("![](%s)", png_files[grep("CC", png_files)]))
+
+      cat('\n', '<br>', '\n\n')
+      
+  }
+
+```
+
+#### GO -simplify {.tabset .tabset-fade .tabset-pills}
+
+```{r up down varying FC astr cocul GO enrich plot - simplify, echo = F,  results='asis', eval=T, comment=""}
+abs_LFC_cutoff <-c(0.6, 1.3, 1.6)
+cat("\n\n")
+for (f in abs_LFC_cutoff){
+      png_files <- list.files( paste0(out_res_clustProf, "dge_absLFC", sub("\\.", "pt", f) , "/go/"), pattern="bothcult_clust_cmp_enrichGO_up_dn_reg*", full.names = T)
+      png_files <- png_files[grep("png", png_files)]
+      png_files <- png_files[grep("simplify", png_files)]
+      cat(sprintf("##### abs LFC %s \n", f)) #tab for comparison
+      cat(sprintf("![](%s)", png_files[grep("BP", png_files)]))
+      cat(sprintf("![](%s)", png_files[grep("CC", png_files)]))
+
+      cat('\n', '<br>', '\n\n')
+      
+}
+```
+
+### Visualising GeneRatio  in upregulated genes  {.tabset .tabset-fade .tabset-pills}
+
+```{r up reg generatio, echo = F,  results='asis', eval=T, comment="", out.width="50%", out.height="50%"}
+abs_LFC_cutoff <-c(0.6, 1, 1.3, 1.6) 
+for (f in abs_LFC_cutoff) {
+      #f <- abs_LFC_cutoff[1]
+      if(f == 1){
+        png_path <- paste0(out_res_clustProf, "dge/reactome/")
+      }else {
+        png_path <- paste0(out_res_clustProf, "dge_absLFC", sub("\\.", "pt", f) , "/reactome/")
+
+      }    
+      png_files <- list.files( png_path, pattern = "*barplot.png", full.names = T)
+      dot_png <- paste0(png_path,   "bothcult_clust_cmp_enrichPath_up_reg.png")
+
+      cat(sprintf("#### abs LFC %s \n", f)) #tab for comparison
+      cat(sprintf("![](%s)", png_files[grep("both", png_files)])) 
+      cat(sprintf("![](%s)", dot_png)) 
+      cat(sprintf("![](%s)", png_files[grep("astr", png_files)]))
+      cat(sprintf("![](%s)", png_files[grep("cocul", png_files)]))
+    
+      cat('\n', '<br>', '\n\n')
+      
+  }
+
+
+```
+
+
+## Overlap of up and down regualted genes in astrocytes and coculture
+### UpsetR plots  
+
+ FDR < 0.05 & FC >= 2 <br>
+Up regulated & Down regulated
+
+```{r overlap inde upsetR FC2, echo = F, out.width="40%", out.height="40%"}
+knitr::include_graphics(paste0(out_res_clustProf, "dge_overlap_inde/dge_fdr5_fc2overlap_inde_up_upsetr.png") )
+
+knitr::include_graphics(paste0(out_res_clustProf, "dge_overlap_inde/dge_fdr5_fc2overlap_inde_down_upsetr.png") )
+```
+
+### Comparing ennrichments in overlapping and independent, up and down regulated genes in astrocytes and coculture {.tabset .tabset-fade .tabset-pills}
+#### Reactome pathways
+```{r overlap inde reac, echo = F, out.width="100%", out.height="100%"}
+knitr::include_graphics(paste0(out_res_clustProf, "dge_overlap_inde/dge_fdr5_fc2overlap_inde_up_dn_clustProf_cmp_enrichPathway.png") )
+```
+#### GO-All
+
+```{r overlap inde GO, echo = F, out.width="70%", out.height="70%"}
+knitr::include_graphics(paste0(out_res_clustProf, "dge_overlap_inde/dge_fdr5_fc2overlap_inde_up_dn_clustProf_cmp_enrichGO.png") )
+```
+
+
+```{r  overlap inde GO - simplify, echo = F,  results='asis', eval=T, comment=""}
+png_files <- list.files( paste0(out_res_clustProf, "dge_overlap_inde"), pattern="*simplify.png", full.names = T)
+#png_files <- png_files[grep("png", png_files)]
+#png_files <- png_files[grep("simplify", png_files)]
+
+cat("\n\n")
+for (f in png_files){
+      #f <- abs_LFC_cutoff[1]
+      cat(sprintf("#### %s\n", gsub("dge_fdr5_fc2overlap_inde_up_dn_clustProf_cmp_|.png", "", basename(f)))) #tab for comparison
+      #cat(knitr::include_graphics(f))  
+      cat(sprintf("![](%s)", f))
+      cat('\n', '<br>', '\n\n')
+    
+}
+```
+
+
+```{r  overlap inde GO , echo = F,  results='asis', eval=T, comment=""}
+png_files <- list.files( paste0(out_res_clustProf, "dge_overlap_inde"), pattern="dge_fdr5_fc2overlap_inde_up_dn_clustProf_cmp_GO_", full.names = T)
+png_files <- png_files[grep("png", png_files)]
+png_files <- png_files[grep("simplify", png_files, invert=T)]
+
+cat("\n\n")
+for (f in png_files){
+      #f <- abs_LFC_cutoff[1]
+      cat(sprintf("#### %s \n", gsub("dge_fdr5_fc2overlap_inde_up_dn_clustProf_cmp_|.png", "", basename(f)))) #tab for comparison
+      #cat(knitr::include_graphics(f))  
+      cat(sprintf("![](%s)", f))
+      cat('\n', '<br>', '\n\n')
+    
+}
+```
+
+
+#DS
+
+At FDR < 5% and abs(dpsi) >=0.1
+
+```{r ds, eval=T, include=F}
+#{.tabset .tabset-fade .tabset-pills}
+summ_analy <- summ[ analysis =="DS", ] 
+
+data_source <- unique(summ_analy$threshold)
+out <- vector(mode = "character", length = length(data_source))
+for (i in data_source) {
+  out[i] <- knit_expand(text = c(" <b> {{stringr::str_to_title(i)}} </b>",
+                                 "```{r, echo = FALSE}",
+                                 "summ_analy[threshold == '{{i}}',.(cell_culture, total_tested, nSig, pct_sig)]",
+                                 "```"))
+}
+
+```
+`r paste(knit(text = out), collapse = '\n')`
+
+
+##Reactome Pathways 
+ORA Reactome pathways- No enrichment observed for the DS genes in astrocytes
+
+
+##GO {.tabset .tabset-fade .tabset-pills}
+ORA - GO
+
+### Astrocytes
+```{r ds go astr, echo = F, out.width="50%", out.height="50%"}
+pngfiles <- list.files(paste0(out_res_clustProf, "ds_pt1/go/"), pattern= "*.png", full.names = T)
+
+png_go <- pngfiles[grep("GO", pngfiles)]
+png_go <- png_go[grep("simp", png_go)]
+
+knitr::include_graphics(png_go[ grep("astr", png_go)] )
+```
+
+### Coculture
+```{r ds go cocul, echo = F, out.width="50%", out.height="50%"}
+
+knitr::include_graphics(png_go[ grep("cocul", png_go)] )
+```
+
+
+
+```{r ds astr cocul go enrich_table, echo=F }
+png_go <- png_go[ grep("BP|CC", png_go)]
+dt_go <- lapply(png_go, function(f){
+  #f <- png_go[1]
+  fname <-  gsub(".png", ".tsv", f)
+  dt_enrich <- fread( fname )
+  head(dt_enrich)
+  dt_enrich$source <- gsub(".png|ora_enr", "", basename(f))
+  return(dt_enrich)
+  
+} )
+dt_go <- rbindlist(dt_go)
+#head(dt_enrich, 2)
+data_source <- unique(dt_go$source)
+out <- vector(mode = "character", length = length(data_source))
+for (i in data_source) {
+  out[i] <- knit_expand(text = c("### {{stringr::str_to_title(i)}}",
+                                 "```{r, echo = FALSE}",
+                                 "dt_go[source == '{{i}}',.( Description, p.adjust, GeneRatio, BgRatio, geneID, ID)]",
+                                 "```"))
+}
+```
+
+`r paste(knit(text = out), collapse = '\n')`
+
+# DGE & DS - overlap of terms
+## CompareCluster - Go and Reactome Pathways {.tabset .tabset-fade .tabset-pills}
+
+### Reactome Pathways
+```{r ora astr, echo = F, out.width="50%", out.height="50%"}
+knitr::include_graphics(paste0(out_res_clustProf, "dge_ds_pt1/reac/astr_clust_cmp_dge_ds_enrichPath.png") )
+knitr::include_graphics(paste0(out_res_clustProf, "dge_ds_pt1/reac/cocul_clust_cmp_dge_ds_enrichPath.png") )
+```
+
+### GO :all
+```{r ora cocul, echo = F, out.width="50%", out.height="50%"}
+knitr::include_graphics(paste0(out_res_clustProf, "dge_ds_pt1/go/astr_clust_cmp_dge_ds_enrichGO.png") )
+knitr::include_graphics(paste0(out_res_clustProf, "dge_ds_pt1/go/cocul_clust_cmp_dge_ds_enrichGO.png") )
+```
+
+### GO : BP
+```{r ora go BP astr, echo = F, out.width="50%", out.height="50%"}
+knitr::include_graphics(paste0(out_res_clustProf, "dge_ds_pt1/go/astr_clust_cmp_dge_ds_enrichGO_BP.png") )
+knitr::include_graphics(paste0(out_res_clustProf, "dge_ds_pt1/go/cocul_clust_cmp_dge_ds_enrichGO_BP.png") )
+```
+
+### GO: CC
+```{r ora go CC cocul, echo = F, out.width="50%", out.height="50%"}
+knitr::include_graphics(paste0(out_res_clustProf, "dge_ds_pt1/go/astr_clust_cmp_dge_ds_enrichGO_CC.png") )
+knitr::include_graphics(paste0(out_res_clustProf, "dge_ds_pt1/go/cocul_clust_cmp_dge_ds_enrichGO_CC.png") )
+```

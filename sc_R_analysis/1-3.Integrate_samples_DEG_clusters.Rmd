@@ -1,0 +1,210 @@
+---
+title: "SC19093 neuron - astrocyte co-cultures"
+author: "Karishma D'Sa"
+subtitle: Differential expression analysis between clusters
+output:
+  html_document:
+    df_print: paged
+---
+
+Using clustering at resolution 0.25
+
+
+```{r}
+RMD_file_name <- "1-8.Integrate_samples_DEG_clusters"
+```
+
+
+```{r libraries, include = F}
+library(tidyverse)
+library(here)
+
+library(ggpubr)
+library(openxlsx)
+#for seurat
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+suppressPackageStartupMessages(library(Seurat))
+
+```
+
+```{r, For parallelisation, include=F, eval=F}
+library("BiocParallel")
+register(MulticoreParam(6))
+```
+
+
+
+```{r load_data, include=F, eval=F}
+# Load data generated with additional clustering res in script #1-1.Integrate_samples_check_clus_additional_res.Rmd
+
+data_integrated <- readRDS(
+  here(
+    "output",
+    "1-1.Integrate_samples_check_clus_additional_res",
+    "Seurat_integrated_datasets_cell_cycle_regressed_clustered_UMAP.rds"
+  )
+)
+
+# Ensure that the default assay is set to integrated
+DefaultAssay(data_integrated) <- "integrated"
+# Specify the clustering resolution to be used subsequently
+Idents(object = data_integrated) <- "integrated_snn_res.0.25"
+
+
+
+
+```
+
+```{r Path to output and figures directories, echo =F}
+output <- str_c(here(), "output", RMD_file_name, sep = "/")
+
+if (!dir.exists(output)) {
+  dir.create(output, recursive = TRUE)
+}
+
+figures_out <- str_c(here(), "figures", RMD_file_name, sep = "/")
+
+if (!dir.exists(figures_out)) {
+  dir.create(figures_out, recursive = TRUE)
+}
+
+```
+
+There were 8 clusters identified in the integrated dataset with a clustering resolution of 0.25 (after regressing out the cell cycle effects), 
+2 of which were identified as likely astrocytic ( clusters 0 and 4). 
+
+
+# Identify differentially expressed genes in clusters 0 vs cluster 4
+
+DGE run using Seurat's FindMarkers() and te default 'Wilcox' test
+
+```{r findMarkers deseq default values, echo=F, eval = F, include=F }
+levels(data_integrated) #clusters
+DefaultAssay(data_integrated) <- "RNA"
+# Specify the clustering resolution to be used subsequently
+Idents(object = data_integrated) <- "integrated_snn_res.0.25"
+DefaultAssay(data_integrated)
+#Using the default  "wilcox" test
+cluster0_4_deg <-
+        FindMarkers(
+          data_integrated,
+          ident.1 = "0",
+          ident.2 = "4",
+          test.use =  "wilcox", 
+          verbose = TRUE
+        )
+    
+ 
+write.xlsx(cluster0_4_deg, file = str_c(output, "/DGE_findMarker_cluster0_vs_4.xlsx"), row.names=T)
+      
+DefaultAssay(data_integrated) <- "integrated"
+```
+
+<br>
+<br>The differentially expressed genes at FDR < 5% <br>
+<br>
+Legend for columns in table below :<br>
+avg_logFC: log fold-change of the average expression between the two groups. Positive values indicate that the gene is more highly expressed in the first group (ident.1, which is cluster 0 here)<br>
+pct.1: The percentage of cells where the gene is detected in the first group <br>
+pct.2: The percentage of cells where the gene is detected in the second group <br>
+
+#Default parameters - FindMarkers()
+
+
+```{r dge table, echo =F}
+cluster0_4_deg <- as.data.frame(read.xlsx(str_c(output, "/DGE_findMarker_cluster0_vs_4.xlsx") ), stringsAsFactors=F)
+#head(cluster0_4_deg, 2)  
+table(cluster0_4_deg$p_val_adj < 0.05)
+names(cluster0_4_deg)[1] <- "gene" 
+cluster0_4_deg <- cluster0_4_deg %>% filter(p_val_adj <  0.05)
+DT::datatable(cluster0_4_deg, rownames = F)      
+```
+Note; the default setting of FindMarkers() results is fewer genes being returned. Running FindMarkers(), changing the LFC threshold from default 0.25 to 0 so we get all the genes <br>
+and not just the filters set. <br>
+Also increasing it to 1
+
+```{r findMarkers deseq default values, echo=F, eval = F, include=F }
+levels(data_integrated) #clusters
+DefaultAssay(data_integrated) <- "RNA"
+# Specify the clustering resolution to be used subsequently
+Idents(object = data_integrated) <- "integrated_snn_res.0.25"
+DefaultAssay(data_integrated)
+#Using the default  "wilcox" test
+lfcs <- c(0, 1)
+lapply(lfcs, function(lfc_thresh){
+  
+  cluster0_4_deg <-
+          FindMarkers(
+            data_integrated,
+            ident.1 = "0",
+            ident.2 = "4",
+            test.use =  "wilcox", 
+            logfc.threshold = lfc_thresh, 
+            verbose = TRUE
+          )
+      
+   
+  write.xlsx(cluster0_4_deg, file = str_c(output, "/DGE_findMarker_lfcThresh", lfc_thresh, "_cluster0_vs_4.xlsx"), row.names=T)
+})
+      
+DefaultAssay(data_integrated) <- "integrated"
+```
+
+#Updating   logfc.threshold Parameter  - FindMarkers()
+
+## set to 0
+```{r dge table, echo =F}
+cluster0_4_deg <- as.data.frame(read.xlsx(str_c(output, "/DGE_findMarker_lfcThresh0_cluster0_vs_4.xlsx") ), stringsAsFactors=F)
+#head(cluster0_4_deg, 2)  
+table(cluster0_4_deg$p_val_adj < 0.05)
+names(cluster0_4_deg)[1] <- "gene" 
+cluster0_4_deg <- cluster0_4_deg %>% filter(p_val_adj <  0.05)
+DT::datatable(cluster0_4_deg, rownames = F)      
+```
+
+
+## set to 1
+```{r dge table, echo =F}
+cluster0_4_deg <- as.data.frame(read.xlsx(str_c(output, "/DGE_findMarker_lfcThresh1_cluster0_vs_4.xlsx") ), stringsAsFactors=F)
+#head(cluster0_4_deg, 2)  
+table(cluster0_4_deg$p_val_adj < 0.05)
+names(cluster0_4_deg)[1] <- "gene" 
+cluster0_4_deg <- cluster0_4_deg %>% filter(p_val_adj <  0.05)
+DT::datatable(cluster0_4_deg, rownames = F)      
+```
+
+
+#Adding gene annotation
+
+```{r }
+#BiocManager::install("AnnotationHub")
+
+#code from https://hbctraining.github.io/scRNA-seq_online/lessons/fetching_annotations.html
+# Connect to AnnotationHub
+library(AnnotationDbi)
+ah <- AnnotationHub()
+
+# Access the Ensembl database for organism
+ahDb <- query(ah, 
+              pattern = c("Homo sapiens", "EnsDb"), 
+              ignore.case = TRUE)
+
+# Acquire the latest annotation files
+id <- ahDb %>%
+        mcols() %>%
+        rownames() %>%
+        tail(n = 1)
+
+# Download the appropriate Ensembldb database
+edb <- ah[[id]]
+
+# Extract gene-level information from database
+annotations <- genes(edb, 
+                     return.type = "data.frame")
+
+# Select annotations of interest
+annotations <- annotations %>%
+        dplyr::select(gene_id, gene_name, seq_name, gene_biotype, description)
+```

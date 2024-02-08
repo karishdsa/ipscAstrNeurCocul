@@ -1,0 +1,900 @@
+---
+title: "Splicing analysis -Runs Leafcutter with additional filtering "
+output: 
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+# Splicing analysis using Leafcutter
+Dasper has been run to annotate the STAR junctions ( star_junction_annotation.Rmd) that serve as input into Leafcutter. This has identified junctions of type 'ambiguous'. No junctions are annotated as 'none. Therefore excluding junctions of type 'ambiguous'. <br> 
+Also, excluding introns of length < 25nt, as this is the minimum sequence length reqd for the splicing – introns of length <25 bases doesn’t represent splicing activity.
+
+#Leafcutter overview
+Leafcutter is a suite of methods that allow the identification and quantification of novel and known alternative splicing events by focusing on intron excisions. <br>
+Li et. al, Nat Gen 2017, https://www.nature.com/articles/s41588-017-0004-9
+<br><br>
+It uses split reads to uncover alternative intron-excision by finding introns that share splice sites. <br>
+
+It captures changes in local splicing events through construction of intron clusters, wherein overlapping introns are connected by the splice junction(s) they share
+<br>
+<u>Leafcutter overview </u><br>
+In the figure below -
+(a) shows two clusters of variably excised introns identified by Leafcutter.<br>
+(b) Leafcutter workflow. The yellow dots indicate the steps followed in the differntial splicing analysis for the project.<br>
+
+![Leafcutter overview](/home/ipscAstrocyteNeuron/files/leafcutter_ed_ab.png)
+
+#Running Leafcutter to identify differences in intron usage 
+##Steps involved and some of the key parameters set/defaults used<br><br>
+(https://davidaknowles.github.io/leafcutter/articles/Usage.html) <br>
+ <b>1. Convert aligned bams -> junction files </b><br>
+   To identify clusters of introns, split reads that map with <b>>= 6 nt</b> into each exon are extract from aligned.bam files.<br><br>
+<b> 2. Grouping introns into clusters </b><br>
+ -cluster the introns found in the junction files. <br>
+ -It uses the strand information <br>
+ -For each cluster, Leafcutter excludes introns where :<br>
+  < 30 reads across all samples ( default value) or <br>
+  < 0.1% reads in a cluster support a junction (removes rarely used introns, which are defined on the basis of the proportion of reads supporting a given intron compared with other introns in the same cluster, and re-clusters leftover introns)
+  <br><br>
+ <b>3. Differential splicing (DS) analysis </b><br>
+ - <b>Additional step</b> performed of collapsing the counts for the technical replicates for each intron identified as <i>chromosome:intron_start:intron_end:cluster_id</i>.<br>
+ - <b>PCs 2, 3 and 4  added as potential confounders </b><br>
+ - Tests are performed where :<br>
+    (a) introns have >=1 supporting spliced read in >=5 samples (defaults)<br>
+    (b) At least 3 samples per group have >= 20 reads (defaults)
+<br><br>
+
+
+##Steps executed
+###Convert aligned bams to junction files
+Converting SJ.out.tab files from STAR to leafcutter .junc file using the RNAseqProcessing ryten lab package function convert_STAR_SJ_to_junc () <br> <br>
+ Also, <br>
+ (i) excluding the blacklist regions, .bed file for the same present in /data/references/ENCODE_blacklist_v2/hg38-blacklist.v2.bed <br>
+ (ii) excluding the junction in ambiguous genes. No junction was annotated type 'none' <br>
+ (iii) excluding junctions of with < 25
+ 
+```{r libs, include=FALSE, eval=T}
+library(dplyr)
+library(tidyverse)
+library(data.table)
+library(knitr)
+library(UpSetR)
+library(gprofiler2)
+library(here)
+
+source(here("../../RNAseqProcessing/R/leafcutter_functions.R"))
+source(here("./R/common_sample.R"))
+source(here("./R/common_gprofiler.R"))
+source(here("./R/plot_setting.R"))
+source(here("./R/common_leafcutter.R"))
+source(here("./R/common_upsetR.R"))
+```
+
+```{r convert_STAR_SJ_to_junc , echo = F , eval = F}
+
+convert_STAR_SJ_to_junc_and_filter(sj_dir_path = "/data/RNA_seq_ipsc/processed/star/",
+            output_path = "/home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters/junc_files/",
+          path_to_ENCODE_blacklist = "/data/references/ENCODE_blacklist_v2/hg38-blacklist.v2.bed",
+           file_junc_toExclude  = "/home/ipscAstrocyteNeuron/results/star/star_ann)junctID_ambig.bed",
+          exclude_introns_of_length_less_than = 25)
+
+```
+```{bash count_no_junc_files, eval = F, echo =F}
+wc -l /home/ipscAstrocyteNeuron/results/leafcutter/junc_files/list_juncfiles.txt
+```
+
+###Clustering the introns from the junction files
+Define intron clusters using leafcutter_cluster_regtools.py script <br>
+
+Setting the following parameters (using default values except for the maximum intron length):  <br>
+  -j JUNCFILES : text file with all junction files to be processed  <br>
+  -o OUTPREFIX : output prefix (default leafcutter)  <br>
+  -r RUNDIR    : write to directory (default ./)  <br>
+  -l MAXINTRONLEN  : maximum intron length in bp (default 100,000bp)  1,000,000 was used in the STAR alignment for these samples as per ENCODE <br>
+  -m MINCLUREADS : minimum reads in a cluster (default 30 reads)  <br>
+  -p MINCLURATIO : minimum fraction of reads in a cluster that support a junction (default 0.001)  <br>
+  -s STRAND : use strand info (default=True) <br>
+    
+```{bash cluster_introns, echo = T , eval = F}
+python /tools/leafcutter/clustering/leafcutter_cluster.py \
+-j /home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters/junc_files/list_juncfiles.txt \
+-o ipsc_astro_neuron \
+-r /home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters/intron_clusters/ \
+-l 1000000 \
+-m 30 \
+-p 0.001 \
+-s True
+
+```
+
+The per individual counts are stored in the file :  <i>ipsc_astro_neuron_perind_numers.counts.gz</i> within <i>/home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters/intron_clusters/ </i>
+
+###Differential splicing analysis
+For the differential splicing analysis, leafcutter requires the following files:<br>
+- <b>intron count file</b> generated above. However, the counts need to be collapsed across technical replicates.<br><br>
+- <b>groups file</b> : A two column tab-separated file where the first column is the sample name and the second is the grouping variable -whichever occurs first will be considered as the baseline. <br>
+<u>Confounders/covariates can be included </u> as columns<br>
+The command line interface supports only 2 groups. Therefore, creating multiple group files for treated vs untreated(base line)- astrocytes, neurons, astrocyte+neuron. <br>
+- <b>exon file</b> : Enables LeafCutter to annotate clusters to the gene they correspond to. <br> <br>
+
+
+####Collapsing the counts for the technical replicates
+For the technical replicates (group = cells + treatment + indi) - summing up the counts for each intron identified as as chromosome:intron_start:intron_end:cluster_id.( e.g. chr1:17055:17233:clu_1 )
+```{r collapsing_tech_repl_counts_getsampleIDs, echo=FALSE, eval =FALSE}
+perind <- as.data.frame(fread(here("../results/leafcutter_additionalFilters/intron_clusters/ipsc_astro_neuron_perind_numers.counts.gz"))) #the warning re: additional column named as V1 is sorted by the next 2 steps
+#head(perind, 2)
+rownames(perind) <- perind$V1
+perind$V1 <- NULL
+t_perind <- t(perind) #transpose
+
+#get the sample IDs for the replicates 
+sampleIds <- gsub("_SJ_leafcutter", "", rownames(t_perind))
+sInfo <- map_sampleIds2sample_info(sampleIds)
+sInfo <- sInfo[, .(sampleIds_queried, cells, treatment, indi,  replicate, sample)]
+sInfo$repl_grp <- paste0(sInfo$cells, "_", sInfo$treatment, "_", sInfo$indi)   
+sInfo <- as.data.frame(sInfo, stringsAsFactor =F)
+rownames(sInfo) <- paste0(sInfo$sampleIds_queried, "_SJ_leafcutter")
+```
+```{r collapsing_tech_replicate_counts, echo=FALSE, eval =FALSE}
+#collapse the counts for the technical replicates
+
+sInfo_subset <- sInfo[, c("repl_grp", "cells", "treatment")]
+comb_counts_sinfo <- merge(sInfo_subset, t_perind, by = "row.names", all.y=T)
+comb_counts_sinfo$Row.names <- NULL
+comb_counts_sinfo$cells <- NULL
+comb_counts_sinfo$treatment <- NULL
+data.frame(table(comb_counts_sinfo$repl_grp))
+
+setDT(comb_counts_sinfo)
+
+collapsed_counts <- comb_counts_sinfo[, by=repl_grp, lapply(.SD, sum)]
+setDF(comb_counts_sinfo)
+
+```
+```{r save_collapsed_counts, echo =F, eval=F}
+#saving the counts collapsed across tech replicates
+collapsed_counts <- as.data.frame(collapsed_counts, stringsAsFactors= F)
+rownames(collapsed_counts) <- collapsed_counts$repl_grp
+collapsed_counts$repl_grp <- NULL
+counts_collapsed_replicates <- data.frame(t(collapsed_counts), stringsAsFactors=F)
+save(counts_collapsed_replicates, file=here("../results/leafcutter_additionalFilters/intron_clusters/ipsc_astro_neuron_perind_numers.counts_collapsed_replicates.rda"))
+write.table(counts_collapsed_replicates, file=gzfile(here("../results/leafcutter_additionalFilters/intron_clusters/ipsc_astro_neuron_perind_numers.counts_collapsed_replicates1.gz")), quote = F, row.names = T, sep =" ")
+rm(collapsed_counts, comb_counts_sinfo, perind, t_perind)
+```
+####Creating a groups file
+This is a two column tab-separated file where the first column is the sample name (i.e. the filename of the ‘bam’) and the second is the grouping variable -whichever occurs first will be considered as the baseline. <br>
+Here, no treatment is placed first and is the baseline. <br><br>
+
+Confounders/covariates to be included as columns - here PC2, PC3 and PC4 were added as potential confounders.
+Group files are saved <condn>vs<baseline> : treatment_vs_no_treatment_group_file.txt
+
+```{r create_grp_files, echo =F, eval=F}
+
+outPath <- here("../results/leafcutter_additionalFilters_postdeconv/")
+#creating group files for each of the cells( astro, neuron, astroneuron) treated vs untreated, where untreated will be 1st and so the baseline
+#colnames in the file will contain = collapsedSampleId   treatment   PCs
+
+#get the PCs
+load(here("../results/dge_postdeconv/correct_PC234/deseq2_dds_clean_design_correctedPCs234_grp_dge.rda"))
+sInfo_pcs <- colData(dds_clean) %>% 
+  as_tibble() %>% 
+  dplyr::select(collapse_group, PC2, PC3, PC4) %>% as.data.frame(stringsAsFactors=F)
+
+head(sInfo_pcs, 3)
+head(sInfo, 3)
+sInfo$pcs_repl_grp <- paste0(sInfo$cells, sInfo$treatment, "_", sInfo$indi)   
+sInfo$leafcutter_sample <- rownames(sInfo)
+rownames(sInfo) <- NULL
+sInfo_subset <- unique(sInfo[, c("repl_grp", "cells", "treatment", "pcs_repl_grp")])
+head(sInfo_subset, 3)
+sInfo_pcs <- merge(sInfo_subset, sInfo_pcs, by.y="collapse_group", by.x="pcs_repl_grp", all.y=T) #exenatide are already excluded in dge and so sInfo_pcs
+
+#exclude exenatide
+sInfo_pcs <- sInfo_pcs %>% filter(treatment != "1uM_syn_oligomer_and_exenatid")
+
+#get sample info
+#head(sInfo,3); head(sInfo_pcs)
+cells <- unique(sInfo_pcs$cells)
+oPath <- paste0(outPath, "diff_splicing/grp_files/")
+if(!dir.exists(oPath)){
+  dir.create(oPath, recursive = T)
+}
+grp_files <- lapply(cells, function(ct){
+  recs_notreat <- sInfo_pcs %>% dplyr::filter(cells == ct & treatment == "no_treatment") %>% dplyr::select(repl_grp, treatment, PC2, PC3, PC4 )
+  recs_treat <- sInfo_pcs %>% dplyr::filter(cells == ct & treatment == "1uM_syn_oligomer") %>% dplyr::select(repl_grp, treatment, PC2, PC3, PC4 )
+  recs <- rbind(recs_notreat, recs_treat)
+  outfname <- paste0(oPath,ct, "_treatment_vs_no_treatment_group_file.txt")
+  write.table(recs, file= outfname, quote=F, row.names = F, col.names = F, sep="\t")
+  return(outfname)
+})
+unlist(grp_files)
+
+
+```
+
+####Creating the exon file
+Enables LeafCutter to annotate clusters to the gene they correspond to.
+```{bash create_exon_file, echo =F, eval=F}
+cd /data/references/ensembl/gtf_gff3/v93/
+gzip -k Homo_sapiens.GRCh38.93.gtf # -k option keeps the original file 
+cd
+Rscript /tools/leafcutter/scripts/gtf_to_exons.R \
+/data/references/ensembl/gtf_gff3/v93/Homo_sapiens.GRCh38.93.gtf.gz \
+/data/references/ensembl/gtf_gff3/v93/leafcutter/Homo_sapiens.GRCh38.93_LC_exon_file.txt.gz
+```
+
+####Running the differential splicing analysis
+Using the wraparound script 'leafcutter_ds_multi_pairwise.R' from RNAseqProcessing package to run Leafcutter's differential splicing for each of the group files created above. <br><br>
+It generates <u>2 output files</u> : <br>
+1. Containing test status, log likelihood ratio, degree of freedom, and p-value for each cluster (_cluster_significance.txt ) and <br>
+2. Containing the effect sizes for each intron (_effect_sizes.txt) <br><br> 
+
+Leafcutter parameters set : <br>
+  --max_cluster_size  - Don't test clusters with more introns than this (default=Inf)<br>
+  --min_samples_per_intron - Ignore introns used (i.e. at least one supporting read) in fewer than n samples (default=5) <br>
+  --min_samples_per_group - Require this many samples in each group to have at least min_coverage reads (default=3) <br>
+  --min_coverage -Require min_samples_per_group samples in each group to have at least this many reads ( default=20) <br>
+  --timeout - Maximum time (in seconds) allowed for a single optimization run ( default=30) <br>
+  --num_threads - Number of threads to use (default=1) <br>
+  --exon_file - File defining known exons, example in data/gencode19_exons.txt.gz. Columns should be chr, start, end, strand, gene_name. Optional, only just to label the clusters. <br>
+
+<b>All parameters set to default </b>, except for num_threads. <br> <br>
+
+<u>Note </u>:This will not run for neuron treated vs untreated as there is only 1 sample in each group. This can be changed, however the authors have only checked the calibration of leafcutter p-values down to n=4 samples per group.
+<br>
+
+```{bash ds_analysis, echo = T, eval = F}
+file_counts="/home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters/intron_clusters/ipsc_astro_neuron_perind_numers.counts_collapsed_replicates1.gz"
+file_exon="/data/references/ensembl/gtf_gff3/v93/leafcutter/Homo_sapiens.GRCh38.93_LC_exon_file.txt.gz"
+path_grpfiles="/home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters_postdeconv/diff_splicing/grp_files/"
+
+nohup Rscript /home/RNAseqProcessing/analysis/leafcutter_ds_multi_pairwise.R \
+$file_counts \
+$path_grpfiles \
+--output_prefix=/home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters_postdeconv/diff_splicing/ \
+--max_cluster_size=Inf \
+--min_samples_per_intron=5 \
+--min_samples_per_group=3 \
+--min_coverage=20 \
+--timeout=30 \
+--num_threads=6 \
+--exon_file=$file_exon \
+&>/home/ipscAstrocyteNeuron/ipscAstroNeu/R/logs/leafcutter_ds_treat_untreat_postdeconv.log&
+
+```
+
+Runs completed successfully for <br>
+coculture treated vs untreated and astrocytes treated vs untreated. 
+
+As expected neuronal samples did not run successfully - <br> 
+<i>Error message</i> :"The number of samples in the smallest group is less than min_samples_per_intron, which means no clusters are testable. You can reduce min_samples_per_intron using the -i option, but <b> note that we have only carefully checked the calibration of leafcutter p-values down to n=4 samples per group.</b>"
+
+###Leafviz
+####Generating annotation data - input files
+This step processes a given GTF to generate lists of exons, introns and splice sites.
+
+```{bash generate_leafviz_ann_data, echo = T , eval = F}
+/tools/leafcutter_0_2_9/leafcutter/leafviz/gtf2leafcutter.pl \
+-o /data/references/ensembl/gtf_gff3/v93/leafcutter/Homo_sapiens.GRCh38.93 \
+/data/references/ensembl/gtf_gff3/v93/Homo_sapiens.GRCh38.93.gtf.gz
+
+```
+####Preparing leafcutter differential splicing results for leafviz
+
+```{bash prep_ds_results_4_leafviz, echo = T , eval = F}
+#Note made a copy of the group files for leafviz script below, keeoing the astrocyte and coculture files, as it requires the same number of files in the cluster and effect paths but there are no results for neuron grp
+main_path="/home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters_postdeconv/"
+file_counts="/home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters/intron_clusters/ipsc_astro_neuron_perind_numers.counts_collapsed_replicates1.gz"
+
+cluster_sig_path=$main_path"diff_splicing/"
+effect_size_path=$main_path"diff_splicing/"
+annotation_code="/data/references/ensembl/gtf_gff3/v93/leafcutter/Homo_sapiens.GRCh38.93"
+
+nohup Rscript /home/ipscAstrocyteNeuron/ipscAstroNeu/R/leafviz_multi_pairwise.R \
+$file_counts \
+$cluster_sig_path \
+$effect_size_path \
+$annotation_code \
+--output_dir=/home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters_postdeconv/leafviz/ \
+--group_file_dir=/home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters_postdeconv/diff_splicing/grp_files_copy_4_leafviz/ \
+--FDR=0.05 \
+&>/home/ipscAstrocyteNeuron/ipscAstroNeu/R/logs/leafviz_prepare_results_treat_untreated_addFilters_postdeconv.log&
+
+```
+
+####Running Leafviz
+Astrocyte neuron treatment vs no treatment
+```{r run_leafviz_comp1, echo = T, eval=F, class.source='fold-show'}
+outPath <- here("../results/leafcutter_additionalFilters_postdeconv/")
+run_leafviz(leafviz_dir = "/tools/leafcutter_0_2_9/leafcutter/leafviz/", 
+                              results_filename = paste0(outPath,"leafviz/astrocyte_neuron_treatment_vs_no_treatment.Rda"))
+
+```
+
+Astrocyte treatment vs no treatment
+```{r run_leafviz_comp2, echo = T, eval=F, class.source='fold-show'}
+
+run_leafviz(leafviz_dir = "/tools/leafcutter_0_2_9/leafcutter/leafviz/", 
+                              results_filename = paste0(outPath,"leafviz/astrocyte_treatment_vs_no_treatment.Rda"))
+
+```
+
+#Results
+```{r collate_results, echo = F, eval = F}
+#loading the leafcutter output files
+cluster_files <- list.files(paste0(outPath, "diff_splicing/"), pattern = "cluster_significance", recursive = T, full.names = T)
+intron_files <- list.files(paste0(outPath, "diff_splicing/"), pattern = "effect_", recursive = T, full.names = T)
+
+cat("\nCluster files:")
+cluster_recs <- lapply(cluster_files, function(c_file){
+    #c_file <- cluster_files[1]
+    comp <- gsub("_cluster_significance.txt", "", basename(c_file))
+    
+    recs <- fread(c_file)
+    recs$comparison <- comp
+    cat("\n",comp, ":", nrow(recs))
+    return(recs)
+  })
+cluster_recs <- rbindlist(cluster_recs)
+cat("\nTotal #records=", nrow(cluster_recs))
+
+cat("\nIntron files:")
+intron_eff_recs <- lapply(intron_files, function(i_file){
+    comp <- gsub("_effect_sizes.txt", "", basename(i_file))
+    recs <- fread(i_file)
+    recs$comparison <- comp
+    cat("\n",comp, ":", nrow(recs))
+    return(recs)
+  })
+intron_eff_recs <- rbindlist(intron_eff_recs)
+cat("\nTotal #records=", nrow(intron_eff_recs))
+
+#keeping clusters that lie in a single gene, excluding those that overlap with multiple genes
+cluster_recs$nGenes <- lengths(strsplit(as.character(cluster_recs$genes), ","))
+cat("\nTable showing the nClusters that overlap with the different number of genes ( how many overlap with 1, 2, 3, etc genes). ")
+table(cluster_recs$comparison, cluster_recs$nGenes,exclude= NULL)
+cluster_recs_single_gene <- cluster_recs[ nGenes ==1, ]
+
+#merge with the intron dt and add regulation - up, down, no_change
+intron_eff_recs[, c("chr", "start", "end",  "clusterID") := tstrsplit(intron, ":", fixed=TRUE)]
+intron_eff_recs[ , cluster:= do.call(paste,c(.SD, sep = ":")) , .SDcols= c("chr", "clusterID") ]
+cluster_recs_single_gene_intron <- cluster_recs_single_gene %>% left_join(intron_eff_recs, by = c("comparison", "cluster")) #as want to keep the recs where status is not success. intron_eff_recs only contains the introns where status is success
+
+head(cluster_recs_single_gene_intron, 2)
+cluster_recs_single_gene_intron$reg <- NULL
+#(reg = up where p.adjust < 0.05 & deltapsi >0,
+# =  down when p.adjust < 0.05 & deltapsi < 0, 
+# = same when p.adjust < 0.05 & deltapsi ==0)
+  cluster_recs_single_gene_intron[  p.adjust < 0.05 & deltapsi > 0 , reg:="up"]
+  cluster_recs_single_gene_intron[  p.adjust < 0.05 & deltapsi < 0 , reg:="down"]
+  cluster_recs_single_gene_intron[  p.adjust < 0.05 & deltapsi == 0 , reg:="no_change"]
+
+  table(cluster_recs_single_gene_intron$reg, exclude= NULL)
+
+
+cluster_recs_intron <- cluster_recs %>% left_join(intron_eff_recs, by = c("comparison", "cluster")) #as want to keep the recs where status is not success. intron_eff_recs only contains the introns where status is success
+
+fwrite(cluster_recs_single_gene_intron, file=paste0(outPath,"diff_splicing/combGrp_clust_effSize_singleGene.tsv"), sep="\t", quote=F, row.names = F)
+
+fwrite(cluster_recs_intron, file=paste0(outPath,"diff_splicing/combGrp_clust_effSize_all.tsv"), sep="\t", quote=F, row.names = F)
+
+outRda <- paste0(outPath,"diff_splicing/combGrp_clust_effSize.rda")
+save(cluster_recs, intron_eff_recs, cluster_recs_single_gene_intron, file = outRda)
+
+rm(cluster_recs, cluster_files, cluster_recs_single_gene, cluster_recs_intron, cluster_recs_single_gene_intron, intron_eff_recs, intron_files)
+```
+##Summary
+- Naming convention <i>condition_vs_baseline</i> <br> <br>
+
+- Differential splicing is measured in terms of the change in the percent spliced in (ΔPSI).<br>
+Delta psi is the difference in usage proportion (condition 2 - condition 1). 
+
+```{r generate_summary, echo =F, eval=F}
+#rm(list=ls())
+outPath <- here("../results/leafcutter_additionalFilters_postdeconv/")
+load(paste0(outPath,"diff_splicing/combGrp_clust_effSize.rda"))
+comps <- unique(cluster_recs$comparison)
+summ_all <- lapply(comps, function(cmp){
+  #cmp <- comps[1]
+  c_recs <- cluster_recs[ comparison== cmp,]
+  
+  summ_counts <- data.table(total_clusters= length(c_recs$cluster), 
+                            total_clusters_single_gene=length(c_recs[nGenes==1, cluster]))
+  status <- data.table(table(c_recs[ nGenes ==1, status], exclude = NULL))
+  status$comparison <- cmp
+  #setnames(status,old = c("V1"), new = c("cluster_in_single_gene" ))                    
+  status <- dcast(status,comparison~V1, value.var =  "N"  )
+  #head(status, 2)
+         
+  summ <- cbind(summ_counts, status)
+  rm(summ_counts, status)
+  summ$pct_successfully_tested <- (summ$Success/summ$total_clusters_single_gene)*100
+  #DS clusters(p.adjust(FDR < 0.05))
+  singlegene_c_int_recs <- cluster_recs_single_gene_intron[comparison==cmp & nGenes== 1, ]
+  summ_sig <- data.table(diff_spliced_clusters_single_gene_fdr_pt05 = length(c_recs[ nGenes ==1 & p.adjust < 0.05, cluster]), diff_spliced_clusters_single_gene_fdr_5_delta_psi_pt1 = length(unique(singlegene_c_int_recs[ p.adjust < 0.05 & abs(deltapsi) >=0.1, cluster])))
+
+  summ <- cbind(summ, summ_sig)
+  summ$pct_diff_spliced_clusters_single_gene_fdr_pt05_of_success <- (summ$diff_spliced_clusters_single_gene_fdr_pt05/ summ$Success)*100
+  summ$pct_diff_spliced_clusters_single_gene_fdr_pt05_and_delta_psi_pt1_of_success <- (summ$diff_spliced_clusters_single_gene_fdr_5_delta_psi_pt1/ summ$Success)*100
+  
+  rm( summ_sig)
+  summ <- as.data.frame(t(summ), stringsAsFactors = F)
+  names(summ)[1] <- cmp
+  return(summ)
+})
+summ_all <- cbind.data.frame(summ_all)
+summ_all <- summ_all[rownames(summ_all) !="comparison", ]   
+
+fwrite(summ_all, file = paste0(outPath, "diff_splicing/summary.tsv"), quote=F, sep="\t", row.names = T)
+
+```
+
+```{r summary, echo=FALSE, eval=T}
+outPath <- here("../results/leafcutter_additionalFilters_postdeconv/")
+summ_all <- fread(paste0(outPath, "diff_splicing/summary.tsv"))
+setnames(summ_all,  new= gsub("_", " ", names(summ_all)))
+setnames(summ_all,old ="V1",   new= "description")
+cols <- c("description")
+summ_all[ , (cols) := lapply( .SD, function(x) { gsub("_", " ", x) } ), .SDcols=cols ]
+
+summ_all[ , description:=sub("diff ", "differentially ", description)] 
+summ_all[ , description:=stringr::str_to_sentence(description)]
+setnames(summ_all, new= stringr::str_to_sentence(names(summ_all)))
+DT::datatable(summ_all) %>%
+    DT::formatStyle(columns = colnames(.), fontSize = '8pt' )
+```
+
+
+We see a higher percentage of differentially spliced clusters (single genes) in the astrocytes ( treated vs untreated) compared to the coculture at  FDR < 0.05 and delta psi >= 0.10  <br>
+
+# Annotating the junctions
+
+The star junctions were annotated using junction_annot() from dasper using the gtf provided, classifying them into the following categories - annotated, novel_acceptor, novel_donor, novel_combo, novel_exon_skip and unannotated. Those annotated as ambig_gene were excluded from this analysis
+
+```{r generate_summ_junc_ann, eval=F, include=F}
+outPath <- here("../results/leafcutter_additionalFilters_postdeconv/")
+load(paste0(outPath, "diff_splicing/combGrp_clust_effSize.rda"))
+length(unique(cluster_recs$cluster)) #includes those wiht pvals as na
+#[1] 54648
+ length(unique(intron_eff_recs$cluster))
+#[1] 46701
+head(intron_eff_recs, 2)
+anno_junc_df <- read.delim(here("../results/star/star_ann_junctID_type.tsv"), sep="\t")
+head(anno_junc_df,2)
+anno_junc_df <- anno_junc_df[ , c("junction_id", "type")] #added
+
+intron_eff_recs <-  intron_eff_recs %>% 
+			tidyr::separate(., col = "cluster",
+            into = c("prefix", "cluster_id", "strand"),
+                    sep = "_", remove=F) %>%
+			mutate(junction_id = str_c( sub("chr", "", chr),":", start, "-", (as.character(as.numeric(end)-1)), ":", strand))
+#added remove = F above as cluster column is used below in merge
+
+head(intron_eff_recs, 2)
+
+comb <- merge( intron_eff_recs, anno_junc_df, by = "junction_id", all.x=T)
+head(comb, 2)
+length(unique(cluster_recs$cluster))
+#[1] 54648 nUnique clusters identified
+cluster_recs <- cluster_recs[ status == "Success", ]
+length(unique(cluster_recs[ grep("\\.", cluster), cluster ]))
+#186 clusters that had been tested had no strand info and no gene info
+cluster_recs <- cluster_recs[ grep("\\.", cluster, invert = T), ]
+head(cluster_recs, 2)
+length(which( is.na(cluster_recs$genes)))
+#[1] 4786 clusters still had NA for genes
+
+head(cluster_recs,3)
+head(comb, 3)
+comb <- merge( comb, cluster_recs, by = c("cluster", "comparison"), all.y=T) #352,087
+length(unique(comb$cluster))
+#[1] 46515
+table(comb$nGenes, exclude=NULL) #introns, comparison
+#     1      2      3      4     15     22 
+#337160  12067   2437    337     40     46 
+table(cluster_recs$nGenes, exclude=NULL) #; clusters lie in >1 gene
+#    1     2     3     4    15    22
+#84957  2714   387    36     2     4
+
+#considering clusters in a single gene & gene is not NA
+comb <- comb[nGenes ==1 & !is.na(genes), ] #319170
+
+comb <- comb %>% dplyr::select(comparison, cluster, junction_id, intron, p.adjust, deltapsi, genes, nGenes, type, status)
+
+setDT(comb)
+nrow(comb[ is.na(p.adjust),]) #0 - as have selected those that were succssfuly tested
+#head(comb, 3)
+comb[ p.adjust < 0.05, sig := T ]
+comb[ p.adjust < 0.05 & abs(deltapsi) >= 0.1, sig_dpsi := T ]
+comb[ , grp:=paste0(comparison, ":", type) ]
+head(comb,2)
+
+fwrite(comb, file = paste0(outPath, "diff_splicing/combGrp_clust_junct_anno_singleGene.tsv"), sep="\t", quote=F, row.names = F)
+
+```
+Using the annotated STAR junctions for annotation, linking to leafcutter results by the junction id <br>
+
+Note: Although the junctions annotated by dasper as ambiguous genes were removed, leafcutter's clusters of intron junctions were in > 1 gene. Therefore, excluding these and only considering cluster in a single gene and where the gene name is not NA.
+<br>
+Also,  leafcutter had clusters with junctions and no strand assigned. Excluding these.
+
+
+```{r, generate_summ_junc_ann_table, eval=F, include=F}
+
+#intron or junction id counts
+comb[, total_counts := .N, by = comparison]
+comb[, total_type := .N, by = .(comparison,type)]
+
+counts <- unique(comb[,.(comparison, type, total_counts, total_type, grp)])
+
+fdrsig <- unique(
+  comb[ p.adjust < 0.05 , .N, by = .(grp)][comb[ p.adjust < 0.05 , (.N/total_type)*100, by = .(grp)], on= c("grp"), nomatch=0] )
+setnames(fdrsig, old=c("N", "V1"), new=c("n_sig_per_type","pct_sig_of_total_type"))
+
+fdr_dpsi_sig <- unique(
+  comb[( p.adjust < 0.05 & abs(deltapsi) >=0.1 ), .N, by = .(grp)][comb[ ( p.adjust < 0.05 & abs(deltapsi) >=0.1 ) , (.N/total_type)*100, by = .(grp)], on= c("grp"), nomatch=0] )
+setnames(fdr_dpsi_sig, old=c("N", "V1"), 
+         new=c("n_sig_dpsi10_per_type","pct_sig_dpsi10_of_total_type"))
+
+
+summ <- Reduce(function(...) merge(..., by="grp", all=T), list(counts, fdrsig, fdr_dpsi_sig))
+summ[, total_sig := sum(n_sig_per_type), by = .(comparison)]
+summ[, pct_type_sig_of_total_sig := (n_sig_per_type/total_sig)*100]
+summ[, pct_type_sig_dpsi10_of_total_sig := (n_sig_dpsi10_per_type/total_sig)*100]
+
+fwrite(summ, paste0(outPath, "diff_splicing/leafcutter_junctions_annotated_summ.tsv"), sep="\t", quote=F, row.names = F)
+
+#generating  plots
+plot_path <- paste0(outPath, "diff_splicing/junc_ann_plots/")
+if(!dir.exists(plot_path)){
+  dir.create(plot_path)
+}
+generate_plots_sigDS_totalTypeTested(summ, anno_regrp =F, plot_path)
+```
+
+
+```{r, proc_summ_junc_ann_table, eval=T, include=F}
+outPath <- here("../results/leafcutter_additionalFilters_postdeconv/")
+summ <- fread(paste0(outPath, "diff_splicing/leafcutter_junctions_annotated_summ.tsv"))
+#plotting the % and showing the n
+summ[, pct_total := (total_type/total_counts)*100]
+head(summ,2)
+
+summ[, comparison := gsub("astrocyte_neuron", "coculture", comparison)]
+#summ[, comparison := gsub("_", " ", comparison)]
+#summ[, comparison := gsub(" vs ", "\nvs\n", comparison)]
+
+summ[, type := gsub("_", " ", type)] 
+summ[ type == "ambig_gene", type := "ambiguous gene"] 
+summ$grp <- NULL
+setnames(summ, old=c("type", "total_type", "n_sig_per_type", "pct_sig_of_total_type", "n_sig_dpsi10_per_type", "pct_sig_dpsi10_of_total_type"), 
+         new =c("Type", "Total", "nSig_DS_Introns", "Percent_Sig", "nSig_DS_dpsi", "Percent_Sig_DS_dpsi"))
+data_source <- unique(summ$comparison)
+```
+
+
+```{r generate summ table grouping annot type,eval=F, include=F}
+
+comb <- fread(paste0(outPath, "diff_splicing/combGrp_clust_junct_anno_singleGene.tsv"))
+comb <- comb %>%
+  dplyr::mutate(anno_grp = ifelse(type == "annotated", "annotated",
+                                    ifelse(type == "unannotated", "unannotated", "partially_annotated"))) 
+unique(comb$anno_grp)
+comb[ , grp:=paste0(comparison, ":", anno_grp) ]
+###
+#intron or junction id counts
+comb[, total_counts := .N, by = comparison]
+comb[, total_type := .N, by = .(comparison,anno_grp)]
+#table(comb$comparison)
+#unique(comb[ , .(total_counts, comparison)])
+counts <- unique(comb[,.(comparison, anno_grp, total_counts, total_type, grp)])
+
+fdrsig <- unique(
+  comb[ p.adjust < 0.05 , .N, by = .(grp)][comb[ p.adjust < 0.05 , (.N/total_type)*100, by = .(grp)], on= c("grp"), nomatch=0] )
+setnames(fdrsig, old=c("N", "V1"), new=c("n_sig_per_type","pct_sig_of_total_type"))
+
+fdr_dpsi_sig <- unique(
+  comb[( p.adjust < 0.05 & abs(deltapsi) >=0.1 ), .N, by = .(grp)][comb[ ( p.adjust < 0.05 & abs(deltapsi) >=0.1 ) , (.N/total_type)*100, by = .(grp)], on= c("grp"), nomatch=0] )
+setnames(fdr_dpsi_sig, old=c("N", "V1"), 
+         new=c("n_sig_dpsi10_per_type","pct_sig_dpsi10_of_total_type"))
+
+
+summ <- Reduce(function(...) merge(..., by="grp", all=T), list(counts, fdrsig, fdr_dpsi_sig))
+summ[, total_sig := sum(n_sig_per_type), by = .(comparison)]
+summ[, pct_type_sig_of_total_sig := (n_sig_per_type/total_sig)*100]
+summ[, pct_type_sig_dpsi10_of_total_sig := (n_sig_dpsi10_per_type/total_sig)*100]
+
+fwrite(summ, paste0(outPath , "diff_splicing/leafcutter_junctions_annotated_regrp_summ.tsv", sep="\t", quote=F, row.names = F))
+
+#generating a plot
+setnames(summ, old = "anno_grp", new= "type")
+
+generate_plots_sigDS_totalTypeTested(summ, anno_regrp =T, plot_path )
+  
+
+```
+
+### Tabular view by comparison {.tabset .tabset-fade .tabset-pills}
+The tables provide the n numbers. <br><br>
+Here the percentages are of the total junction type studied for a comparison
+
+```{r, disp_summ_junc_ann_table, eval=T, include=F}
+out <- vector(mode = "character", length = length(data_source))
+for (i in data_source) {
+  out[i] <- knit_expand(text = c("#### {{stringr::str_to_title(i)}}",
+                                 "```{r, echo = FALSE}",
+                                 "summ[comparison == '{{i}}',.(Type, Total, nSig_DS_Introns, Percent_Sig, nSig_DS_dpsi, Percent_Sig_DS_dpsi)]",
+                                 "```"))
+}
+
+```
+`r paste(knit(text = out), collapse = '\n')`
+
+###Plot showing the % of junctions of an annotation type that have been successfully tested for DS
+
+Plots have been generated considering 2 levels of significance.<br> 
+- only FDR cut off (FDR < 5%)<br>
+- FDR and delta psi cutoff (FDR <5% & | dpsi| >=10%) <br>
+
+```{r displayplots_junctAnnoTypeStudied, eval=T, echo=F , out.width="70%", out.height="30%"}
+file <- paste0(outPath, "diff_splicing/junc_ann_plots/pct_total.png")
+knitr::include_graphics(file)
+
+```
+<br>We see the same proportion of junctions under each annotation type have been tested in each comparison.
+
+### Plot showing the % DS junctions of an Annotation type that are significant.
+```{r displayplots_pctAnnoTypeSig, eval=T, echo=F , out.width="70%", out.height="30%"}
+files <- list.files(paste0(outPath, "diff_splicing/junc_ann_plots/"), pattern = "*_totalAnnoType.png", full.names = T)
+knitr::include_graphics(files)
+
+```
+
+<u><b>Clubbing the novel junctions - regrouping </b></u> <br>
+Regrouping : <br>
+partially annotated = includes novel_acceptor, novel_donor, novel_combo and novel_exon_skip junctions <br>
+
+annotated = annotated junctions <br>
+unannotated = unannotated junctions <br>
+```{r displayplots_pctAnnoTypeSig_regrp, eval=T, echo=F , out.width="70%", out.height="30%"}
+files <- list.files(paste0(outPath, "diff_splicing/junc_ann_plots/"), pattern = "*_totalAnnoTypeanno_regrp.png", full.names = T)
+knitr::include_graphics(files)
+
+```
+```{r, generate_summ_junc_ann_plot, eval=F, include=F}
+summ <- fread( paste0(outPath, "diff_splicing/leafcutter_junctions_annotated_summ.tsv"))
+#plotting the % and showing the n
+summ[, pct_total := (total_type/total_counts)*100]
+
+head(summ,2)
+
+summ[, lab_cmp := gsub("astrocyte_neuron", "coculture", comparison)]
+summ[, lab_cmp := gsub("_", " ", lab_cmp)]
+summ[, lab_cmp := gsub(" vs ", "\nvs\n", lab_cmp)]
+
+summ[, lab_type := gsub("_", " ", type)] 
+summ[ type == "ambig_gene", lab_type := "ambiguous gene"] 
+
+title <- "Percentage of junctions of an annotation studied by leafcutter \n(% of total junctions studied in a comparison)"
+ ylims <- c(0, max(summ$pct_total)+5)
+  ggplot(summ, aes(x = lab_type, y=pct_total)) +
+    geom_col(aes(fill=lab_type)) +
+    geom_text(aes(label = paste0("(",total_type, ")")), vjust = -0.5, size=2.5) +
+    ggtitle(paste0(title, "\n (n) presented for each annotation type")) +
+    labs(x= "Junction annotation", y="Percentage of junctions (%)") +
+    ylim(ylims)+
+    facet_grid(lab_cmp~. ) +
+    theme(legend.position = "none")
+
+ggsave(filename = paste0(outPath, "diff_splicing/junc_ann_plots/pct_total.png"), dpi= 300)
+
+title <- "Percentage of junctions of an annotation type with DS  \n of  total significant, FDR< 5%, in a comparison)"
+ ylims <- c(0, max(summ$pct_type_sig_of_total_sig)+5)
+ggplot(summ, aes(x = type, y=pct_type_sig_of_total_sig, fill=lab_type)) +
+    geom_col(aes(fill=type)) +
+    geom_text(aes(label = paste0("(",n_sig_per_type, ")")), vjust = -0.5, size=2.5) +
+    ggtitle( title ) +
+    labs(x= "Junction annotation", y="Percentage of junctions \n (%)") +
+   ylim(ylims)+
+  facet_grid(lab_cmp~. ) +
+    theme(legend.position = "none")
+ggsave(filename = paste0(outPath, "diff_splicing/junc_ann_plots/pctTypeSig_totalSig.png"), dpi= 300)
+
+summ <- summ %>% 
+  group_by(comparison) %>%
+  mutate( total_sig_dpsi10 = sum(n_sig_dpsi10_per_type)  )
+summ <- summ %>%
+  mutate( pct_sig_dpsi10_per_type_of_total_sig_dpsi10 = (n_sig_dpsi10_per_type/total_sig_dpsi10)*100 )
+
+title <- "Percentage of junctions of an annotation type DS  \n total significant DS & |dpsi|>= 0.1, in a comparison)"
+ ylims <- c(0, max(summ$pct_sig_dpsi10_per_type_of_total_sig_dpsi10)+5)
+ggplot(summ, aes(x = type, y=pct_sig_dpsi10_per_type_of_total_sig_dpsi10, fill=lab_type)) +
+      geom_col(aes(fill=type)) +
+    geom_text(aes(label = paste0("(",n_sig_dpsi10_per_type, ")")), vjust = -0.5, size=2.5) +
+    ggtitle( title ) +
+    labs(x= "Junction annotation", y="Percentage of junctions \n (%)") +
+   ylim(ylims)+
+  facet_grid(lab_cmp~. ) +
+    theme(legend.position = "none")
+ggsave(filename = paste0(outPath, "diff_splicing/junc_ann_plots/pctTypeSigDpsi_totalSig.png"), dpi= 300)
+
+```
+
+
+
+### Plots : % of junction annotations of total significant in each comparison 
+
+
+```{r ann_plots, echo = F, out.width="69%", out.height="30%",fig.cap="  ",fig.show='hold',fig.align='center'}
+files <- list.files(path = paste0(outPath, "diff_splicing/junc_ann_plots"), pattern = "Sig.png", full.names = TRUE)
+ 
+knitr::include_graphics(files)
+``` 
+
+
+
+# Overlap of the DS genes between the astrocytes and coculture, treated vs untreated
+Taking the significant clusters and then collapsing the dpsi per gene per comparison
+<br>
+Selecting genes with |dpsi| >= 0.10
+
+## Overlap plot
+
+```{r overlap between comparisons, eval =F, include=F}
+#get the gene lists
+rdaFile <- paste0(outPath, "diff_splicing/combGrp_clust_effSize.rda")
+ds_all_dt <- get_all_genes_ds_cluster_recs(rdaFile)
+ds_all_dt <- ds_all_dt[ !is.na(genes), ]
+head(ds_all_dt, 2)
+ds_dt <- ds_all_dt[ p.adjust < 0.05 & !is.na(genes), ]
+ds_dt[ ,abs_deltapsi := abs(deltapsi)]
+ds_dt[ ,max_abs_dpsi := max(abs_deltapsi), by = c('comparison', 'genes')]
+
+ds_genes <- unique( ds_dt[ max_abs_dpsi >= 0.10, .(comparison, genes, max_abs_dpsi)])
+table(ds_genes$comparison)
+
+comps <- unique(ds_genes$comparison)
+sig_genes <- lapply(comps, function(x){
+    recs <- ds_genes[ comparison == x, ]
+    return(recs$genes)
+  })
+names(sig_genes) <- comps
+
+outPath_overlap <- paste0(outPath, "diff_splicing/overlaps/")
+if(!dir.exists(outPath_overlap)){
+  dir.create(outPath_overlap)
+}
+#generate the overlap
+outFileUpsetR <- paste0(outPath_overlap, "upsetr_genes_overlap_astro_cocult_treatVsnotreat.png")
+generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label="Oligo vs no treatment")
+
+
+```
+
+```{r upsetR_plot, out.height = "460px", out.width='800px', echo=F, eval=T}
+outFileUpsetR <- paste0(outPath, "diff_splicing/overlaps/upsetr_genes_overlap_astro_cocult_treatVsnotreat.png")
+knitr::include_graphics(outFileUpsetR)
+``` 
+
+
+
+```{r dge ds gene overlap, eval =F, echo= F}
+# in the coculture - treatment vs no treatment ; astrocytes - treatment vs no treatment
+source(here("./R/common_dge.R"))
+
+oPath <- outPath #"/home/ipscAstrocyteNeuron/results/leafcutter_additionalFilters/"
+rdaFile <- paste0(oPath, "diff_splicing/combGrp_clust_effSize.rda")
+ds_genes <- get_all_genes_ds(rdaFile)
+
+#dge
+comp_treat_notreat <- c("astrocyte_1uM_syn_oligomer_vs_astrocyte_no_treatment",
+                        "astrocyte_neuron_1uM_syn_oligomer_vs_astrocyte_neuron_no_treatment")
+deseq_rda_path <- here("../results/dge_postdeconv/correct_PC234/")
+dge_genes <- get_all_genes_dge(deseq_rda_path, comp_treat_notreat) # All genes returned, those with sig FDR, reg updated as up, down
+#table( dge_genes$comp_vs_base, dge_genes$padj < 0.05, exclude = NULL) ; table( dge_genes$comp_vs_base, dge_genes$reg, exclude = NULL) 
+dge_genes[ comp_vs_base == "astrocyte_1uM_syn_oligomer_vs_astrocyte_no_treatment", comparison := "astrocyte_treatment_vs_no_treatment"]
+dge_genes[ comp_vs_base == "astrocyte_neuron_1uM_syn_oligomer_vs_astrocyte_neuron_no_treatment", comparison := "astrocyte_neuron_treatment_vs_no_treatment"]
+
+table(dge_genes$comparison)
+
+dge_genes <- unique(dge_genes[, .(geneid, padj, comparison)])
+
+setnames(dge_genes, old = c("padj"), new = c("padj_dge"))
+setnames(ds_genes, old = c("genes", "min_FDR"), new = c("external_gene_name", "min_padj_ds"))
+
+geneInfo <- getGeneNameBiotype(unique(dge_genes$geneid))
+dge_genes <- merge(dge_genes, geneInfo, by.x = "geneid", by.y = "ensembl_gene_id", all.x=T)
+head(dge_genes,2)
+length(intersect(dge_genes$external_gene_name, ds_genes$external_gene_name)) #12574 overlap
+
+#taking the genes studied in both
+#comb <- merge(dge_genes, ds_genes,  by=c("comparison","external_gene_name"))
+setDT(dge_genes)[ds_genes, min_padj_ds := min_padj_ds, on = c(comparison = "comparison", external_gene_name="external_gene_name") ]
+
+#dge_genes[ external_gene_name == "SDHA", ]; ds_genes[ external_gene_name == "SDHA", ]
+comb <-  dge_genes[ !is.na(min_padj_ds), ]
+#t <- as.data.frame(table(comb$external_gene_name, exclude = NULL))
+#nrow( t[ which(t$Freq >2),]) #279 - gene name present > 2 times
+#comb[ external_gene_name =="ZNRD1", ]; geneInfo[ external_gene_name == "ZNRD1", ]
+
+int_gene <- intersect(dge_genes$external_gene_name, ds_genes$external_gene_name)
+fwrite(comb, paste0(oPath, "dge_ds_tested_overlap.tsv"), sep ="\t", quote=F, row.names = F)
+
+sig <- comb[ padj_dge < 0.05 & min_padj_ds < 0.05, ]
+nrow(sig)
+length(unique(sig$geneid));length(unique(sig$external_gene_name))
+
+
+```
+
+```{r dge_ds overlap  and enrich analsyis, eval=F, echo =F}
+library(UpSetR)
+source(here("./R/common_upsetR.R"))
+source(here("./R/common_gprofiler.R"))
+
+#get the gene lists
+dt <- fread(paste0(outPath, "dge_ds_tested_overlap.tsv"))
+head(dt, 3)
+nrow(dt[ is.na(external_gene_name), ])
+
+comps <- unique(dt$comparison)
+table(dt$comparison)
+
+outPath_overlap <- paste0(outPath, "dge_ds_overlaps/")
+oPath_gprof <- paste0(outPath_overlap, "gprofiler/")
+if(!dir.exists(oPath_gprof)){
+  dir.create(oPath_gprof, recursive = T)
+}
+head(dt, 2)
+dt <- dt[ order(min_padj_ds), ] #most sig ds first
+#overlap 
+upset_plots <- lapply(comps, function(x){
+    #x <- comps[2]
+  
+    ds_sig_genes <- unique( dt[ min_padj_ds < 0.05 & comparison == x , external_gene_name])
+    dge_sig_genes <- unique(dt[ padj_dge < 0.05 & comparison == x , external_gene_name])
+    comb <- list(ds_sig_genes, dge_sig_genes)
+    names(comb) <- c("ds_sig_genes", "dge_sig_genes")
+    
+    cat("\n\nComparison:", x)
+    cat("\n nGenes Sig DS= ", length(ds_sig_genes))
+    cat("\n nGenes Sig DGE= ", length(dge_sig_genes))
+    
+    #generate the overlap
+    outFileUpsetR <- paste0(outPath_overlap, "upsetr_ds_dge_genes_overlap_", x, ".png")
+    generate_save_upsetRPlot( comb, outFileUpsetR,x_label=x)
+   
+    return(outFileUpsetR)
+  })
+
+```
+
+```{r display dge ds overlap, include =F, eval = T}
+dt <- fread(paste0(outPath, "dge_ds_tested_overlap.tsv"))
+dt <- dt[ padj_dge < 0.05 | min_padj_ds < 0.05, ]
+
+dt_cast <-  data.table::dcast(dt, formula = geneid +external_gene_name + gene_biotype ~ comparison, value.var = c("padj_dge", "min_padj_ds") )
+dt_cast <- dt_cast[ order(padj_dge_astrocyte_neuron_treatment_vs_no_treatment),]
+```
+
+# Overlap of genes with significant DS and DGE  
+For the DS, taking the min FDR across clusters per gene
+
+## Overlap plot - per comparison
+<b>Astrocyte neuron - treatment vs no treatment</b>
+```{r dge_ds_upsetR_plot, out.height = "460px", out.width='800px', echo=F, eval=T}
+outFileUpsetR <- paste0(outPath, "dge_ds_overlaps/upsetr_ds_dge_genes_overlap_astrocyte_neuron_treatment_vs_no_treatment.png")
+knitr::include_graphics(outFileUpsetR)
+``` 
+<br><br><br>
+<b>Astrocyte - treatment vs no treatment </b>
+```{r dge_ds_upsetR_plot_astr, out.height = "460px", out.width='800px', echo=F, eval=T}
+outFileUpsetR <- paste0(outPath, "dge_ds_overlaps/upsetr_ds_dge_genes_overlap_astrocyte_treatment_vs_no_treatment.png")
+knitr::include_graphics(outFileUpsetR)
+``` 

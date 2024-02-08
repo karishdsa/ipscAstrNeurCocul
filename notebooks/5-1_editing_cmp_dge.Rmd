@@ -1,0 +1,811 @@
+---
+title: 'Overlap of genes with increased/decreased editing with the DE genes'
+author: "Karishma D'Sa"
+date: "17/10/2022"
+output:
+  html_document:
+    self_contained: no
+    df_print: paged
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+---
+<style type="text/css">
+div.main-container {
+  max-width: 1800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+<br><br>
+
+The final list of edited genes provided by AW - <br> 
+-	sig editing at the site each site assigned using the  Zscore ( from JACUSA) cut-off 1.96 => equiv to pval 0.05 <br>
+-	sites in > 1 gene at the moment <br>
+
+
+```{r libraries, include = FALSE}
+
+#UpSetR to generate intersections oflists
+library(UpSetR)
+
+library(data.table)
+library(ggplot2)
+library(knitr)
+library(ggpubr) 
+library(gridExtra)
+library(here)
+library(tidyverse)
+library(magrittr)
+
+
+source(here("./R/plot_setting.R"))
+source(here("./R/common_upsetR.R"))
+
+deseq_rda_path <-here("../results/dge_postdeconv/correct_PC234/") 
+outPath <- here("../results/mRNA_editing/dge_ds_overlap/")
+
+if(!dir.exists(outPath)){
+  dir.create(outPath, recursive = T)
+}
+out_res_clustProf <- paste0(outPath, "cluster_profiler/" )
+
+outPath_dge_go <- paste0(out_res_clustProf, "dge/go/")
+outPath_ds_go <- paste0(out_res_clustProf, "ds/go/")
+
+comparison_astr <- "astrocyte_treated_vs_untreated"
+comparison_cocul <- "coculture_treated_vs_untreated"
+```
+
+```{r loading the editing data, eval=T, echo=F, include=T}
+#RNA editing 
+ed_data <- fread(here("../files/editing/editing_summary_results_genes.csv"))
+head(ed_data)
+#names(ed_data)
+
+#excluding the neurons
+ed_data <- ed_data[ Sample != "Neuron", ]
+dt_genes_edited <- unique(ed_data[, .(Sample, Gene, SYMBOL)]) #irrespective of inc/dec editing and consequence ( as as gene can have > 1 editing sites with different consequence), includes the new edits
+table(dt_genes_edited$Sample)
+length(unique(dt_genes_edited[ Sample=="Astrocyte", Gene]))
+
+#editing bg genes
+bg_ed <- fread(here("../files/editing/summary_results_all_dif_genelist_background_universe.csv"))
+#head(bg_ed)
+
+#Editing in 3'UTR
+ed_3utr_data <- fread(here("../files/editing/significant_3UTR_genes_ratios.csv"))
+#head( ed_3utr_data, 2)
+
+```
+
+```{r loading the DGE data, eval=T, echo=F, include=F}
+#DGE
+####
+fc2_abs_LFC_cutoff <- 1
+dge <- fread( paste0(deseq_rda_path, "dge_astr_cocult_all.tsv"))
+
+print("DGE at FDR < 5%")
+
+table(dge$comparison, dge$reg, exclude=NULL)
+
+print("DGE at FDR < 5% and FC >=2")
+table(dge$comparison, fcgt2= (dge$padj < 0.05 &
+                              abs(dge$lfcShrink_log2FoldChange) >= fc2_abs_LFC_cutoff),  exclude=NULL)
+
+comp <- unique(dge$comparison)
+dge_genes <- lapply(comp, function(cmp){
+              return(dge[( comparison==cmp & padj < 0.05 & abs(lfcShrink_log2FoldChange) >= fc2_abs_LFC_cutoff), geneid ])
+            }) 
+names(dge_genes) <- comp
+
+dge_genes_fdrOnly <- lapply(comp, function(cmp){
+              return(dge[( comparison==cmp & padj < 0.05 ), geneid ])
+            }) 
+names(dge_genes_fdrOnly) <- comp
+bg_dge <-  unique(dge[ , .(geneid, comparison)])
+```
+
+```{r loading the DS data, eval=T, echo=T, include=F}
+#DS
+###
+abs_dpsi_cutoff <- 0.1
+
+load(here("../results/leafcutter_additionalFilters_postdeconv/diff_splicing/combGrp_clust_effSize.rda"))
+rm(cluster_recs, intron_eff_recs)
+comp <- unique(cluster_recs_single_gene_intron$comparison)
+cluster_recs_single_gene_intron <- cluster_recs_single_gene_intron[ status == "Success" & !(is.na(genes)),] #319199
+
+cluster_recs_single_gene_intron[, abs_deltapsi := abs(cluster_recs_single_gene_intron$deltapsi)]
+
+ds_genes <- lapply(comp, function(cmp){
+    #cmp <- comp[1]
+    #head(cluster_recs_single_gene_intron, 2)  
+    recs <- cluster_recs_single_gene_intron[ comparison== cmp,]
+    #head(recs, 2)
+    #select genes of interest - same filter as used to select query gene
+    recs <- recs[ p.adjust < 0.05 & abs_deltapsi >= 0.1 & !is.na(genes), ]
+    min_recs <- recs[ , .SD[which.min(p.adjust)], by = "genes"] #the 
+    return(unique(min_recs[ , genes]))
+})
+comp <- gsub("astrocyte_neuron", "coculture", comp)
+names(ds_genes) <- comp
+
+bg_ds <-  unique(cluster_recs_single_gene_intron[ , .(genes, comparison)])
+bg_ds[ comparison == "astrocyte_treatment_vs_no_treatment", comparison:= comparison_astr]
+bg_ds[ comparison == "astrocyte_neuron_treatment_vs_no_treatment", comparison:= comparison_cocul]
+setnames(bg_ds, old="genes", new= "gene_name")
+
+print("nBg genes")
+table(bg_ds$comparison)
+print("DS at FDR < 5% and abs_dpsi >=0.1")
+```
+
+```{r editing data table, eval=F, include =F}
+#overlap of the dge, ds and editing 
+#bg
+length( intersect(bg_ed$Gene, dge[ comparison=="astrocyte_treated_vs_untreated" , geneid])) #16429 common genes studied between dge and editing
+length( bg_ed$Gene);  length( dge[ comparison=="astrocyte_treated_vs_untreated", geneid]) #16716 ; 24516 genes studied in each analysis
+
+ed_samples <- unique(dt_genes_edited$Sample)
+dt_ed_up_dn <- lapply( ed_samples, function(s){
+  #s <- ed_samples[1]
+  l_dt <- dt_genes_edited[ Sample == s, ]
+  l_dt[ , `:=` (ed_sig="T", ed_up= "F", ed_down = "F")]  
+  up <- unique( ed_data[ Editing_change == paste0(s, "_increase"), Gene])
+  dn <- unique( ed_data[ Editing_change == paste0(s, "_decrease"), Gene])
+  l_dt[ Gene %in% up, ed_up := "T"]
+  l_dt[ Gene %in% dn, ed_down := "T"]
+  return(l_dt)
+  })
+dt_ed_up_dn <- rbindlist(dt_ed_up_dn)
+
+table(dt_ed_up_dn$Sample, exclude=NULL)
+table(dt_ed_up_dn$Sample, dt_ed_up_dn$ed_up, exclude=NULL)
+table(dt_ed_up_dn$Sample, dt_ed_up_dn$ed_down, exclude=NULL)
+```
+
+```{r dge editing overlap - upsetR plots, eval=F, include =F}
+
+#overlap of the dge and editing
+label_val <- "Astrocytes - treated vs untreated"
+sig_genes <- list( edited = dt_ed_up_dn[ Sample == "Astrocyte", Gene]  , dge_fdr5_fc2 = dge_genes$astrocyte_treated_vs_untreated)
+outFileUpsetR <- paste0(outPath,"upsetr_astr_siggenes_overlap_dgeFC2_ed.png")  #dge fdr & fc 2
+generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+
+
+sig_genes <- list( edited = dt_ed_up_dn[ Sample == "Astrocyte", Gene] , dge_fdr5 = dge_genes_fdrOnly$astrocyte_treated_vs_untreated)
+outFileUpsetR <- paste0(outPath,"upsetr_astr_siggenes_overlap_dge_ed.png")   #dge fdr
+generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+
+
+ bg_genes <- list(bg_ed = bg_ed$Gene, bg_dge_astr = bg_dge[ comparison== comparison_astr, geneid] , bg_dge_cocul = (bg_dge[ comparison== comparison_cocul, geneid]))
+ outFileUpsetR <- paste0(outPath,"upsetr_bggenes_overlap_dge_ed.png")
+ generate_save_upsetRPlot( bg_genes, outFileUpsetR,x_label= "Background genes")
+
+#cocult
+sig_genes <- list( edited = dt_ed_up_dn[ Sample == "Coculture", Gene]  , cocul_dge_fdr5_fc2 = dge_genes$coculture_treated_vs_untreated)
+outFileUpsetR <- paste0(outPath,"upsetr_cocul_siggenes_overlap_dgeFC2_ed.png")   #dge fdr & fc 2
+generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+
+sig_genes <- list( edited = dt_ed_up_dn[ Sample == "Coculture", Gene]  , dge_fdr5 = dge_genes_fdrOnly$coculture_treated_vs_untreated)
+outFileUpsetR <- paste0(outPath,"upsetr_cocul_siggenes_overlap_dge_ed.png")  #dge fdr
+generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+```
+
+```{r dge and ed, eval=F, include =F}
+
+dt_ed_up_dn[ Sample == "Astrocyte", comparison := comparison_astr ]
+dt_ed_up_dn[ Sample == "Coculture", comparison :=comparison_cocul ]
+setnames(dt_ed_up_dn, old = "Gene", new = "geneid")
+table( dt_ed_up_dn$comparison)  
+
+dge <- dge[ , .(geneid, lfcShrink_log2FoldChange, lfcShrink_padj, reg, gene_name, comparison) ] # 46883
+dge_ed_all <- merge(dge, dt_ed_up_dn, by = c("comparison", "geneid"), all=T) #
+
+dge_ed_all$studied_edit <- "F"
+
+dge_ed_all[ geneid %in% bg_ed$Gene, studied_edit := "T"] # wesill only indicate the geens in DGE not studied in editing but not the genes studied in editing that werent in dge
+table(dge_ed_all$studied_edit, exclude=NULL)
+dge_ed_all$studied_in <- "both"             
+dge_ed_all[ is.na(lfcShrink_log2FoldChange) & studied_edit == "T", studied_in := "edit" ]  #these will be the sig edit ones
+
+head( dge_ed_all[ is.na(lfcShrink_log2FoldChange), ])
+dge_ed_all[ !is.na(lfcShrink_log2FoldChange) & studied_edit == "F", studied_in := "dge" ] 
+
+table(dge_ed_all$comparison, dge_ed_all$studied_in, exclude=NULL)
+
+reg_vals <- c("up", "down")
+dge_ed_all[ (reg %in%  reg_vals) & ed_sig =="T", sig_in := "both" ]
+dge_ed_all[ (reg  %in%  reg_vals) & (is.na(ed_sig) | ed_sig == "F"), sig_in := "dge" ]
+dge_ed_all[ !(reg %in% reg_vals) & ed_sig == "T",  sig_in := "edit"]
+dge_ed_all[ is.na(reg) & ed_sig == "T",  sig_in := "edit"]
+
+table(dge_ed_all$comparison, dge_ed_all$sig_in, exclude=NULL)
+```
+
+```{r saving the dge ed, eval=F, include = F}
+fwrite(dge_ed_all, paste0(outPath, "dge_edit_comb_geneset.tsv"), sep="\t", quote=F, row.names = F)
+
+```
+
+```{r genes common to the dge and ed, eval=F, include =F}
+comp <- unique(dge_ed_all$comparison)
+counts_commonSet <- lapply(comp, function(cmp){
+  print(cmp)
+  print("Studied in both, sig in")
+  l_dt <- as.data.table( table(dge_ed_all[ comparison ==cmp & studied_in == "both", sig_in ], exclude=NULL))
+  print(l_dt)
+  l_dt$total_studied_in_both <- sum(l_dt$N)
+  l_dt <- l_dt[V1 != "NA",]
+  setnames(l_dt , old =c("V1", "N"), new= c("sig_in", "nSig"))
+  l_dt$comparison <- cmp
+  return(l_dt)
+})
+rm(comp)
+
+counts_commonSet <- rbindlist(counts_commonSet)
+
+counts_commonSet[ ,pctSig := (nSig/total_studied_in_both)*100]
+head(dge_ed_all, 2)
+fwrite(counts_commonSet, paste0(outPath, "dge_edit_common_geneset_summ_counts.tsv"), sep="\t", quote=F, row.names = F)
+```
+
+
+```{r dge editing overlap, in common geneset - upsetR plots, eval=F, include =F}
+
+common <- dge_ed_all[ studied_in== "both", ]
+#overlap of the dge and editing
+label_val <- "Astrocytes - treated vs untreated"
+cmp <- comparison_astr
+sig_genes <- list( edited = common[ comparison== cmp & ed_sig == "T", geneid]  , 
+                   dge_fdr5_fc2 = common[ comparison == cmp & lfcShrink_padj < 0.05 & abs(lfcShrink_log2FoldChange) >= fc2_abs_LFC_cutoff, geneid])
+outFileUpsetR <- paste0(outPath,"upsetr_commongeneset_astr_siggenes_overlap_dgeFC2_ed.png")  #dge fdr & fc 2
+generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+
+
+sig_genes <- list( edited = common[ comparison== comparison_astr & ed_sig == "T", geneid]   , 
+                   dge_fdr5 = common[ comparison == comparison_astr & lfcShrink_padj < 0.05, geneid])
+outFileUpsetR <- paste0(outPath,"upsetr_commongeneset_astr_siggenes_overlap_dge_ed.png")   #dge fdr
+generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+
+
+
+#cocult
+label_val <- "Co-culture - treated vs untreated"
+cmp <- comparison_cocul
+sig_genes <- list( edited = common[ comparison== cmp & ed_sig == "T", geneid]  , 
+                   dge_fdr5_fc2 = common[ comparison == cmp & lfcShrink_padj < 0.05 & abs(lfcShrink_log2FoldChange) >= fc2_abs_LFC_cutoff, geneid])
+outFileUpsetR <- paste0(outPath,"upsetr_commongeneset_cocul_siggenes_overlap_dgeFC2_ed.png")  #dge fdr & fc 2
+generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+
+
+sig_genes <- list( edited = common[ comparison== cmp & ed_sig == "T", geneid]   , 
+                   dge_fdr5 = common[ comparison == cmp & lfcShrink_padj < 0.05, geneid])
+outFileUpsetR <- paste0(outPath,"upsetr_commongeneset_cocul_siggenes_overlap_dge_ed.png")   #dge fdr
+generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+
+
+#both - coculture and astr
+label_val <- "nGenes studied & sig in DEd & DGE"
+sig_genes <- list( astrocytes =  common[ comparison== comparison_astr & sig_in == "both", geneid]   , 
+                   coculture =  common[ comparison== comparison_cocul & sig_in == "both", geneid]   )
+outFileUpsetR <- paste0(outPath,"upsetr_commongeneset_bothcultures_siggenes_overlap_dge_ed.png")  #dge fdr 
+generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+
+```
+
+
+```{r dge up dn reg  overlap with editing in common geneset - upsetR plots, eval=F, include =F}
+#
+dge_ed_all <- fread( paste0(outPath, "dge_edit_comb_geneset.tsv"))
+dge_ed_all <- replace(dge_ed_all, dge_ed_all=='', NA)
+
+common <- dge_ed_all[ studied_in== "both", ]
+common[ ed_up == "T" & ed_down =="T", ed_reg := "up_down"]
+common[ ed_up == "T" & ed_down =="F", ed_reg := "up"]
+common[ ed_up == "F" & ed_down =="T", ed_reg := "down"]
+
+head(common)
+
+#overlap of the up adn down regulated genes in DGE vs increased decreased DEd
+###########################################################
+comp <- unique(common$comparison)
+counts_commonSet <- lapply(comp, function(cmp){
+  #cmp <- comp[1]
+  print(cmp)
+  
+  print(table(common[ comparison ==cmp , .(reg, ed_reg )], exclude=NULL))
+  l_dt <- as.data.table(table(common[ comparison ==cmp , .(reg, ed_reg )], exclude=NULL))
+  l_dt$total_studied_in_both <- sum(l_dt$N)
+  setnames(l_dt , old =c("reg", "ed_reg"), new= c("sig_dge_reg", "sig_ed_reg"))
+  l_dt$comparison <- cmp
+  return(l_dt)
+})
+counts_commonSet <- rbindlist(counts_commonSet)
+
+counts_commonSet[ ,pct := (N/total_studied_in_both)*100]
+fwrite(counts_commonSet, paste0(outPath, "dge_edit_up_dn_reg_common_geneset_summ_counts.tsv"), sep="\t", quote=F, row.names = F, na="NA")
+
+#overlap of the up DGE vs sig DEd and down DGE vs sig DEd
+####################################################
+reg_vals <- c("up", "down")
+counts_commonSet <- lapply(comp, function(cmp){
+  #cmp <- comp[1]
+  print(cmp)
+  print(table(common[ comparison ==cmp , .(reg, ed_sig )], exclude=NULL))
+  l_dt <- as.data.table(table(common[ comparison ==cmp , .(reg, ed_sig )], exclude=NULL))
+  l_dt$total_studied_in_both <- sum(l_dt$N)
+    
+  setnames(l_dt , old =c("reg"), new= c("sig_dge_reg"))
+  l_dt$comparison <- cmp
+  return(l_dt)
+})
+counts_commonSet <- rbindlist(counts_commonSet)
+
+counts_commonSet[ ,pct := (N/total_studied_in_both)*100]
+fwrite(counts_commonSet, paste0(outPath, "dge_upDnReg_vs_editSig_common_geneset_summ_counts.tsv"), sep="\t", quote=F, row.names = F, na="NA")
+
+#generate upsetR plots
+###########################
+
+ret_upsetr <- lapply(comp, function(cmp){
+  #cmp <- comp[1]
+  print(cmp)
+  #head(common, 2)
+  cult <- gsub("_treated_vs_untreated", "", cmp)
+  label_val <- paste0(cult, " - up reg in DGE & DEd")
+  sig_up_genes <- list( edited_up = common[ comparison== cmp & ed_reg == "up", geneid]  , 
+                   dge_fdr5_up = common[ comparison == cmp & reg == "up", geneid])
+  lengths(sig_up_genes)
+  outFileUpsetR <- paste0(outPath,"upsetr_commongeneset_", cult ,"_up_regSigGenes_dge_ed.png")  #
+  generate_save_upsetRPlot( sig_up_genes, outFileUpsetR,x_label=label_val)
+
+  label_val <- paste0(cult, " - down reg in DGE & DEd")
+  sig_dn_genes <- list( edited_dn = common[ comparison== cmp & ed_reg == "down", geneid]  , 
+                   dge_fdr5_dn = common[ comparison == cmp & reg == "down", geneid])
+  lengths(sig_dn_genes)
+  outFileUpsetR <- paste0(outPath,"upsetr_commongeneset_", cult ,"_dn_regSigGenes_dge_ed.png")  #
+  generate_save_upsetRPlot( sig_dn_genes, outFileUpsetR,x_label=label_val)
+  
+  label_val <- paste0(cult, " - up down reg in DGE & DEd")
+  sig_genes <- list( edited_up = common[ comparison== cmp & ed_reg == "up", geneid]  , 
+                   dge_fdr5_up = common[ comparison == cmp & reg == "up", geneid],
+                   edited_dn = common[ comparison== cmp & ed_reg == "down", geneid]  , 
+                   dge_fdr5_dn = common[ comparison == cmp & reg == "down", geneid]
+    )
+  lengths(sig_genes)
+  outFileUpsetR <- paste0(outPath,"upsetr_commongeneset_", cult ,"_upDn_regSigGenes_dge_ed.png")  #
+  generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+  
+  
+  label_val <- paste0(cult, " - up down reg in DGE & sig DEd")
+  sig_genes <- list( edited_sig = common[ comparison== cmp & ed_sig == "T", geneid]  , 
+                   dge_fdr5_up = common[ comparison == cmp & reg == "up", geneid],
+                   dge_fdr5_dn = common[ comparison == cmp & reg == "down", geneid]
+                   
+                     )
+  lengths(sig_genes)
+  outFileUpsetR <- paste0(outPath,"upsetr_commongeneset_", cult ,"_upDn_regDge_edSig.png")  #
+  generate_save_upsetRPlot( sig_genes, outFileUpsetR,x_label=label_val)
+  
+  
+  return(T)
+})
+
+rm(counts_commonSet, dge_ed_all, common, ret_upsetr)
+
+
+```
+
+
+```{r dge up dn reg  overlap with inc 3UTR editing in common geneset, eval=F, include =F}
+#
+dge_ed_all <- fread( paste0(outPath, "dge_edit_comb_geneset.tsv"))
+dge_ed_all <- replace(dge_ed_all, dge_ed_all=='', NA)
+
+common <- dge_ed_all[ studied_in== "both", ]
+head(common, 2)
+common[ ed_up == "T" & ed_down =="T", ed_reg := "up_down"]
+common[ ed_up == "T" & ed_down =="F", ed_reg := "up"]
+common[ ed_up == "F" & ed_down =="T", ed_reg := "down"]
+
+ed_3utr_data <- ed_3utr_data[ Sample != "Neuron", ]
+head(ed_3utr_data, 2)
+ed_3utr_data[ Sample == "Astrocyte", comparison := comparison_astr]
+ed_3utr_data[ Sample == "Coculture", comparison := comparison_cocul]
+unique(ed_3utr_data$Sample); unique(ed_3utr_data$Editing_change)
+
+#adding ediign ratio for the increased editing
+setDT(common)[ed_3utr_data, ed_log_ratio := log_ratio, on = c(comparison = "comparison", geneid="Gene") ] #on=the column in X will be assigned the values in Y
+setDT(common)[ed_3utr_data, ed_3utr := Editing_change, on = c(comparison = "comparison", geneid="Gene") ] #on=the column in X will be assigned the values in Y
+common[ gene_name== "PAK2", ] ; ed_3utr_data[ SYMBOL== "PAK2", ]
+
+fwrite( common, paste0(outPath, "dge_edit_common_geneset_with_utr.tsv"), sep= "\t", quote=F, row.names = F)
+unique(common$ed_3utr); 
+
+#overlap of the up adn down regulated genes in DGE vs UTR editing
+###########################################################
+comp <- unique(common$comparison)
+counts_commonSet <- lapply(comp, function(cmp){
+  #cmp <- comp[1]
+  print(cmp)
+  
+  print(table(common[ comparison ==cmp , .(reg, ed_3utr )], exclude=NULL))
+  l_dt <- as.data.table(table(common[ comparison ==cmp , .(reg, ed_3utr )], exclude=NULL))
+  l_dt$total_studied_in_both <- sum(l_dt$N)
+  setnames(l_dt , old =c("reg", "ed_3utr"), new= c("sig_dge_reg", "sig_ed3utr_reg"))
+  l_dt$comparison <- cmp
+  return(l_dt)
+})
+
+counts_commonSet <- rbindlist(counts_commonSet)
+
+counts_commonSet[ ,pct := (N/total_studied_in_both)*100]
+fwrite(counts_commonSet, paste0(outPath, "dge_edit3utr_up_dn_reg_common_geneset_summ_counts.tsv"), sep="\t", quote=F, row.names = F, na="NA")
+```
+
+
+#DGE, DEd overlap
+## All genes - UpsetR plots 
+
+### Background {.tabset .tabset-fade .tabset-pills}
+Overlap of the genes studied in the DGE and DEd analyses
+
+#### Astrocytes & Co-culture
+```{r display astr,  echo=F, out.width="100%", out.height="100%"}
+files <- list.files(outPath,pattern="upsetr_*", full.names = T )
+files <- files[ grep("commongeneset", files, invert = T)]
+knitr::include_graphics(files[ grep("_bggenes_", files)])
+```
+
+
+### DGE @ FDR < 5% {.tabset .tabset-fade .tabset-pills}
+
+#### Astrocytes
+```{r display astr fdr, out.width="100%", out.height="100%", echo=F}
+astr_sig_files <- files[ grep("astr_siggenes", files)]
+knitr::include_graphics(astr_sig_files[ grep("dge_ed", astr_sig_files)])
+```
+
+#### Co-culture
+
+```{r display cocul fdr, out.width="100%", out.height="100%", echo=F}
+cocul_sig_files <- files[ grep("cocul_siggenes", files)]
+knitr::include_graphics(cocul_sig_files[ grep("dge_ed", cocul_sig_files)])
+```
+
+### DGE @ FDR < 5% & FC >=2 {.tabset .tabset-fade .tabset-pills}
+
+#### Astrocyte
+```{r display astr fdr fc, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(astr_sig_files[ grep("FC", astr_sig_files)])
+```
+
+#### Co-culture
+```{r display cocul fdr fc, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(cocul_sig_files[ grep("FC", cocul_sig_files)])
+```
+
+## *Common gene set
+
+
+### UpsetR plots
+#### Background 
+Overlap of the genes studied in the DGE and DEd analyses
+
+```{r display bg astr cocul,  echo=F, out.width="100%", out.height="100%"}
+knitr::include_graphics(files[ grep("_bggenes_overlap", files)])
+```
+
+
+#### DGE @ FDR < 5% {.tabset .tabset-fade .tabset-pills}
+
+##### Astrocytes
+```{r comm display astr fdr, out.width="100%", out.height="100%", echo=F}
+files <- list.files(outPath,pattern="upsetr_commongeneset*", full.names = T )
+astr_sig_files <- files[ grep("astr_siggenes", files)]
+knitr::include_graphics(astr_sig_files[ grep("dge_ed", astr_sig_files)])
+```
+
+##### Co-culture
+
+```{r comm display cocul fdr, out.width="100%", out.height="100%", echo=F}
+cocul_sig_files <- files[ grep("cocul_siggenes", files)]
+knitr::include_graphics(cocul_sig_files[ grep("dge_ed", cocul_sig_files)])
+```
+
+##### Overlap of the genes (sig in both analyses) in the astrocytes vs co-culture
+
+```{r comm display astr cocul fdr, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(files[ grep("bothcult", files)])
+```
+
+#### DGE @ FDR < 5% & FC >=2 {.tabset .tabset-fade .tabset-pills}
+
+##### Astrocyte
+```{r display comm astr fdr fc, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(astr_sig_files[ grep("FC", astr_sig_files)])
+```
+
+##### Co-culture
+```{r display comm cocul fdr fc, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(cocul_sig_files[ grep("FC", cocul_sig_files)])
+```
+
+### *Summary counts - Common geneset in the DEd and DGE (FDR < 5%) analysis for the comparison
+
+<b>Astrocytes - treated vs untreated </b> <br>
+```{r summ table astr, eval=T, echo=F}
+dt_summ <- fread(paste0(outPath, "dge_edit_common_geneset_summ_counts.tsv"))
+DT::datatable(dt_summ[ comparison== "astrocyte_treated_vs_untreated", ])
+```
+<br>
+
+<br>
+<b>Co-culture - treated vs untreated </b><br>
+```{r summ table co-cul, eval=T, echo=F}
+DT::datatable(dt_summ[ comparison== "coculture_treated_vs_untreated", ])
+```
+
+<b>Fisher's Exact test run </b><br>
+```{r stat test for overlap between the DGE and DEd in the common geneset, eval =T, echo=F}
+dge_ed_all <- fread( paste0(outPath, "dge_edit_comb_geneset.tsv"))
+dge_ed_all <- replace(dge_ed_all, dge_ed_all=='', NA)
+reg_vals <- c("up", "down")
+common <- dge_ed_all[ studied_in== "both", ]
+common$dge_sig <- "dge_sig_F"
+common[ reg %in% reg_vals,  dge_sig := "dge_sig_T"]
+comp <- unique(common$comparison)
+ret_vals <- lapply(comp, function(cmp){
+  cat("\n=======\n", cmp, "\n")
+  df_conting <- as.data.frame.matrix(table(common[ comparison ==cmp , .(ed_sig, dge_sig) ], exclude=NULL))
+  print(df_conting)
+  fisher <- fisher.test(df_conting)$p.value
+  cat("\nFisher's Exact Test p-value =",fisher)
+  return(T)
+  })
+
+```
+
+###Enrichment analysis 
+<b>Analyses run on the genes studied in both DEd and DGE</b> <br>
+
+#### Sig in DGE vs sig in DEd : cmpclust on astr and co-cult separately {.tabset .tabset-fade .tabset-pills}
+##### Astrocytes - BP 
+```{r cmpclust BP astr, echo=F,  out.width="100%", out.height="100%"}
+knitr::include_graphics( paste0(outPath_dge_go, "/astr_clust_cmp_sigDge_sigDed_enrichGO_BP_simplify.png"))
+```
+
+##### Astrocytes - CC
+```{r cmpclust CC astr, echo=F,  out.width="100%", out.height="100%"}
+knitr::include_graphics( paste0(outPath_dge_go, "/astr_clust_cmp_sigDge_sigDed_enrichGO_CC_simplify.png"))
+```
+
+##### Co-culture - BP 
+No enrichment observed for GO:CC
+```{r cmpclust BP cocult, echo=F,  out.width="100%", out.height="100%"}
+knitr::include_graphics( paste0(outPath_dge_go, "/cocul_clust_cmp_sigDge_sigDed_enrichGO_BP_simplify.png"))
+```
+
+####Sig in both DEd & DGE {.tabset .tabset-fade .tabset-pills}
+##### BP 
+```{r cmpclust BP sig in both, echo=F,  out.width="100%", out.height="100%"}
+knitr::include_graphics( paste0(outPath_dge_go, "/bothCult_clust_cmp_sigin_bothDgeDed_enrichGO_BP_simplify.png"))
+```
+
+##### CC
+```{r cmpclust CC sig in both, echo=F,  out.width="100%", out.height="100%"}
+knitr::include_graphics( paste0(outPath_dge_go, "/bothCult_clust_cmp_sigin_bothDgeDed_enrichGO_CC_simplify.png"))
+```
+
+
+####Of those sig in both DEd & DGE {.tabset .tabset-fade .tabset-pills}
+Common to astr and Co-culture, only in astr or co-culture <br>
+No terms with signinfcant enrichment observed in the common set - too few genes possibly.
+
+##### BP
+```{r cmpclust BP sig in both 1, echo=F,  out.width="100%", out.height="100%"}
+knitr::include_graphics( paste0(outPath_dge_go, "/sigInBothDgeDed_clust_cmp_genesCommon2astrCocul_onlyAstr_onlyCocul_enrichGO_BP_simplify.png"))
+```
+
+##### CC
+```{r cmpclust CC sig in both 2, echo=F,  out.width="100%", out.height="100%"}
+knitr::include_graphics( paste0(outPath_dge_go, "/sigInBothDgeDed_clust_cmp_genesCommon2astrCocul_onlyAstr_onlyCocul_enrichGO_CC_simplify.png"))
+```
+
+##### Genes Sig in both analysis and common to both cultures
+
+```{r sig in both and common table , eval=T, echo=F}
+dt_dge_edit <- fread( paste0(outPath, "dge_edit_comb_geneset.tsv"))
+sigInBoth_astr <- dt_dge_edit[  comparison == comparison_astr & studied_in == "both" & sig_in == "both", geneid]
+sigInBoth_cocul <-  dt_dge_edit[  comparison == comparison_cocul & studied_in == "both" & sig_in == "both", geneid]
+sigInBoth_comm2astrCocul <- intersect(sigInBoth_astr, sigInBoth_cocul)
+
+DT::datatable(dt_dge_edit[geneid %in% sigInBoth_comm2astrCocul, ])
+```
+
+
+####Sig DEd only or DGE only {.tabset .tabset-fade .tabset-pills}
+##### BP
+```{r cmpclust BP sig in either, echo=F,  out.width="100%", out.height="100%"}
+knitr::include_graphics( paste0(outPath_dge_go, "/bothCult_clust_cmp_sigin_DgeOrDed_enrichGO_BP_simplify.png"))
+```
+
+##### CC
+```{r cmpclust CC sig in either, echo=F,  out.width="100%", out.height="100%"}
+knitr::include_graphics( paste0(outPath_dge_go, "/bothCult_clust_cmp_sigin_DgeOrDed_enrichGO_CC_simplify.png"))
+```
+
+
+####Sig DEd only vs DGE only vs DGE & DEd {.tabset .tabset-fade .tabset-pills}
+##### Astrocytes
+compare cluster - genes with  Only DGE, Only DEd, DGE & DEd <br>
+
+```{r enrich astr , out.width="100%", out.height="100%", echo=F}
+files <- list.files(outPath_dge_go,pattern="clust_cmp_sigDge_sigDed_sigboth_enrichGO_BP_simplify.png", full.names = T )
+knitr::include_graphics(files[ grep("astr", files)])
+```
+
+##### Coculture
+compare cluster - genes with  Only DGE, Only DEd, DGE & DEd
+
+```{r enrich cocult , out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(files[ grep("cocul", files)])
+```
+
+
+###Overlap of the up and down regulated genes
+
+#### Summary counts
+An empty cell indicates no significant genes for the column
+```{r dge edit up dn counts, eval=T, echo=F}
+dge_ed_up_dn <- fread( paste0(outPath, "dge_edit_up_dn_reg_common_geneset_summ_counts.tsv"))
+```
+
+##### Astrocytes 
+```{r dge ed up dn overlap astr summ, echo = F}
+DT:: datatable(dge_ed_up_dn[ comparison == comparison_astr, ])
+```
+
+##### Co-culture
+```{r dge ed up dn overlap co-cul summ, echo = F}
+DT:: datatable(dge_ed_up_dn[ comparison == comparison_cocul, ])
+```
+
+#### up and down regulated gene in DE Vs those with increased and decreased DEd -  UpsetR plots {.tabset .tabset-fade .tabset-pills}
+
+##### Astrocytes 
+```{r comm display astr up down, out.width="60%", out.height="60%", echo=F}
+files <- list.files(outPath,pattern="*regSigGenes", full.names = T )
+knitr::include_graphics(files[ grep("astrocyte", files)])
+```
+
+
+##### Co-culture
+```{r comm display cocul up down, out.width="60%", out.height="60%", echo=F}
+knitr::include_graphics(files[ grep("coculture", files)])
+```
+
+
+### Up down regulated DEGs vs those with significant increased and decreased DEd 
+
+#### UpsetR plots {.tabset .tabset-fade .tabset-pills}
+
+##### Astrocytes 
+```{r comm display astr up down dedSig, out.width="60%", out.height="60%", echo=F}
+files <- list.files(outPath,pattern="*upDn_regDge_edSig.png", full.names = T )
+knitr::include_graphics(files[ grep("astrocyte", files)])
+```
+
+##### Co-culture
+```{r comm display cocul up down dedSig, out.width="60%", out.height="60%", echo=F}
+knitr::include_graphics(files[ grep("coculture", files)])
+```
+
+##### Summary counts
+<b> Astrocytes </b>
+```{r dge astr summ table up down DGE vs Ded sig , eval=T, echo=F}
+dt_summ <- fread(paste0(outPath, "dge_upDnReg_vs_editSig_common_geneset_summ_counts.tsv"))
+DT::datatable(dt_summ[ comparison== "astrocyte_treated_vs_untreated", ])
+```
+
+<b> Co-culture</b>
+```{r dge  cocult summ table up down DGE vs Ded sig , eval=T, echo=F}
+DT::datatable(dt_summ[ comparison== "coculture_treated_vs_untreated", ])
+```
+
+#### Enrichment Analysis 
+
+##### Astrocytes {.tabset .tabset-fade .tabset-pills}
+###### Astrocytes increased decreased DEd 
+Genes with increased adn decreased editing that overlap with the DEGs that are up and down regulated 
+```{r enrich astr up down dedSig, out.width="100%", out.height="100%", echo=F}
+inc_dec_deDge_files <- list.files(outPath_dge_go,pattern="UpDnDGE_enrich", full.names = T )
+inc_dec_deDge_files <- inc_dec_deDge_files[ grep("simplify.png", inc_dec_deDge_files)]
+inc_dec_deDge_files <- inc_dec_deDge_files[ grep("utr_", inc_dec_deDge_files, invert = T)]
+knitr::include_graphics(inc_dec_deDge_files[ grep("astrocyte", inc_dec_deDge_files)])
+```
+
+###### Astrocytes decreased DEd 
+
+Genes with decreased editing that overlap with the DEGs that are up and down regulated 
+```{r enrich decc ed astr up down dge, out.width="100%", out.height="100%", echo=F}
+dec_ed_files <- list.files(outPath_dge_go,pattern="_DecDed_", full.names = T )
+dec_ed_files <- dec_ed_files[ grep("simplify.png", dec_ed_files)]
+knitr::include_graphics(dec_ed_files[ grep("astrocyte", dec_ed_files)])
+```
+
+###### Astrocytes increased DEd 
+
+Genes with increased editing that overlap with the DEGs that are up and down regulated 
+```{r enrich inc ed astr up down dge, out.width="100%", out.height="100%", echo=F}
+inc_ed_files <- list.files(outPath_dge_go,pattern="_IncDed_", full.names = T )
+inc_ed_files <- inc_ed_files[ grep("simplify.png", inc_ed_files)]
+knitr::include_graphics(inc_ed_files[ grep("astrocyte", inc_ed_files)])
+```
+
+##### Co-culture {.tabset .tabset-fade .tabset-pills}
+###### Co-culture increased decreased DEd and up reg DGE
+
+
+```{r enrich cocul up down dedSig, out.width="100%", out.height="100%", echo=F}
+
+knitr::include_graphics(inc_dec_deDge_files[ grep("coculture", inc_dec_deDge_files)])
+```
+
+###### Co-culture decreased DEd 
+Genes with decreased editing that overlap with the DEGs that are up and down regulated 
+```{r enrich dec ed cocul up down dge, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(dec_ed_files[ grep("coculture", dec_ed_files)])
+```
+
+###### Co-culture increased DEd 
+Genes with increased editing that overlap with the DEGs that are up and down regulated 
+```{r enrich inc ed cocul up down dge, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(inc_ed_files[ grep("coculture", inc_ed_files)])
+```
+
+
+#DGE, increased 3UTR editing
+
+## Volcano plots
+Gene names where atleast double FC and overlap with increased editing in UTR
+
+```{r vol utr enrichment, eval = T, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(here("../results/mRNA_editing/dge_ds_overlap/dge_incEd_volcano_astrocyte.png"))
+knitr::include_graphics(here("../results/mRNA_editing/dge_ds_overlap/dge_incEd_volcano_coculture.png"))
+
+```
+
+
+##Enrichment analysis
+### Astrocyte
+```{r utr enrichment, eval = T, out.width="100%", out.height="100%", echo=F}
+utrde_Dge_files <- list.files(outPath_dge_go,pattern="utr_", full.names = T )
+files <- utrde_Dge_files[ grep("simplify.png", utrde_Dge_files)]
+knitr::include_graphics(files[ grep("utr_astrocyte_clust_cmp_IncDed_", files)])
+
+```
+
+<b> DGE FC filter </b>
+```{r FC utr enrichment, eval = T, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(files[ grep("utr_FC_astrocyte_clust_cmp_IncDed_", files)])
+
+```
+
+### Coculture
+```{r cocul utr enrichment, eval = T, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(files[ grep("utr_coculture_clust_cmp_IncDed_", files)])
+
+```
+<b> DGE FC filter </b>
+```{r FC utr enrichment cocul, eval = T, out.width="100%", out.height="100%", echo=F}
+knitr::include_graphics(files[ grep("utr_FC_coculture_clust_cmp_IncDed_", files)])
+
+```

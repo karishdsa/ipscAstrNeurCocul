@@ -1,0 +1,253 @@
+---
+title: 'Overlap of genes with increased/decreased editing with the DE and DS genes'
+author: "Karishma D'Sa"
+date: "17/10/2022"
+output:
+  html_document:
+    self_contained: no
+    df_print: paged
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+---
+<style type="text/css">
+div.main-container {
+  max-width: 1800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+<br><br>
+
+The final list of edited genes provided by AW - <br> 
+-	sig editing at the site each site assigned using the  Zscore ( from JACUSA) cut-off 1.96 => equiv to pval 0.05 <br>
+-	sites in > 1 gene at the moment <br>
+
+
+```{r libraries, include = FALSE}
+
+#UpSetR to generate intersections oflists
+library(UpSetR)
+
+library(data.table)
+library(ggplot2)
+library(knitr)
+library(ggpubr) 
+library(gridExtra)
+library(here)
+library(tidyverse)
+library(magrittr)
+
+
+source(here("./R/plot_setting.R"))
+source(here("./R/common_upsetR.R"))
+
+deseq_rda_path <-here("../results/dge_postdeconv/correct_PC234/") 
+outPath <- here("../results/mRNA_editing/dge_ds_overlap/")
+
+if(!dir.exists(outPath)){
+  dir.create(outPath, recursive = T)
+}
+out_res_clustProf <- paste0(outPath, "cluster_profiler/" )
+
+#outPath_dge_go <- paste0(out_res_clustProf, "dge/go/")
+outPath_ds_go <- paste0(out_res_clustProf, "ds/go/")
+
+comparison_astr <- "astrocyte_treated_vs_untreated"
+comparison_cocul <- "coculture_treated_vs_untreated"
+```
+
+```{r loading the editing data, eval=T, echo=F, include=T}
+#RNA editing 
+ed_data <- fread(here("../files/editing/editing_summary_results_genes.csv"))
+head(ed_data, 2)
+#names(ed_data)
+
+#excluding the neurons
+ed_data <- ed_data[ Sample != "Neuron", ]
+dt_genes_edited <- unique(ed_data[, .(Sample, Gene, SYMBOL)]) #irrespective of inc/dec editing and consequence ( as as gene can have > 1 editing sites with different consequence), includes the new edits
+table(dt_genes_edited$Sample)
+length(unique(dt_genes_edited[ Sample=="Astrocyte", Gene])) 
+
+#editing bg genes
+bg_ed <- fread(here("../files/editing/summary_results_all_dif_genelist_background_universe.csv"))
+#head(bg_ed)
+setnames(bg_ed, old = "SYMBOL", new = "genes")
+bg_ed$studied_edit <- "T"
+```
+
+
+```{r loading the DS data, eval=T, echo=T, include=F}
+#DS
+###
+abs_dpsi_cutoff <- 0.1
+
+load(here("../results/leafcutter_additionalFilters_postdeconv/diff_splicing/combGrp_clust_effSize.rda"))
+rm(cluster_recs, intron_eff_recs)
+comp <- unique(cluster_recs_single_gene_intron$comparison)
+cluster_recs_single_gene_intron <- cluster_recs_single_gene_intron[ status == "Success" & !(is.na(genes)),] #319199
+
+cluster_recs_single_gene_intron[, abs_deltapsi := abs(cluster_recs_single_gene_intron$deltapsi)]
+
+ds_genes <- lapply(comp, function(cmp){
+    #cmp <- comp[1]
+    #head(cluster_recs_single_gene_intron, 2)  
+    recs <- cluster_recs_single_gene_intron[ comparison== cmp,]
+    #head(recs, 2)
+    #select genes of interest - same filter as used to select query gene
+    recs <- recs[ p.adjust < 0.05 & abs_deltapsi >= 0.1 & !is.na(genes), ]
+    #recs <- recs[ p.adjust < 0.05 & !is.na(genes), ]
+    #head(recs[ p.adjust < 0.05 & is.na(genes), ])
+    #sigGenes <- unique(recs[ , genes])
+    min_recs <- recs[ , .SD[which.min(p.adjust)], by = "genes"] #the 
+    #return(unique(min_recs[ , genes]))
+    return(min_recs)
+})
+ds_genes<- rbindlist(ds_genes)
+head(ds_genes, 2)
+ds_genes[ comparison == "astrocyte_treatment_vs_no_treatment", comparison:= comparison_astr]
+ds_genes[ comparison == "astrocyte_neuron_treatment_vs_no_treatment", comparison:= comparison_cocul]
+cols2sel <- c(  "genes", "cluster", "p.adjust"   ,      "comparison"  , "deltapsi"   ,  "reg",  "abs_deltapsi")
+ds_genes <- ds_genes[ , ..cols2sel ]
+
+bg_ds <-  unique(cluster_recs_single_gene_intron[ , .(genes, comparison)])
+bg_ds[ comparison == "astrocyte_treatment_vs_no_treatment", comparison:= comparison_astr]
+bg_ds[ comparison == "astrocyte_neuron_treatment_vs_no_treatment", comparison:= comparison_cocul]
+
+print("nBg genes")
+table(bg_ds$comparison)
+
+print("DS at FDR < 5% and abs_dpsi >=0.1")
+table(ds_genes$comparison)
+
+```
+
+
+
+```{r ds and ed, eval=F, include =F}
+#genes studied in both
+dt_genes_edited[ Sample == "Astrocyte", comparison := comparison_astr ]
+dt_genes_edited[ Sample == "Coculture", comparison :=comparison_cocul ]
+setnames(dt_genes_edited, old = "SYMBOL", new = "genes")
+dt_genes_edited$edit_sig <- "T"    #6012
+table( dt_genes_edited$comparison) 
+
+dt_genes_edited <- unique(dt_genes_edited[ , .(genes, comparison, edit_sig)]) #6010 # keeping 1 rec where genes with different ids
+bg_ed <- unique(bg_ed[ , .(genes, studied_edit)])
+
+ds_genes$ds_sig <- "T"
+dt_ds <- merge(bg_ds, ds_genes, by = c("comparison", "genes"), all=T)
+dt_ds$studied_ds <- "T"
+
+ds_ed_all <- merge(dt_ds, dt_genes_edited, by = c("comparison", "genes"), all.x=T) # not considering the genes that were sig edited but not studied for splicing
+
+ds_ed_all$studied_edit <- "F"
+
+ds_ed_all[ genes %in% bg_ed$genes, studied_edit := "T"] # wesill only indicate the geens in DGE not studied in editing but not the genes studied in editing that werent in dge
+
+table(ds_ed_all$studied_edit , ds_ed_all$comparison, exclude=NULL)
+   
+
+table(ds_ed_all$studied_ds, ds_ed_all$comparison, exclude = NULL)
+
+ds_ed_all$studied_in <- "ds"             
+ds_ed_all[ studied_edit == "T", studied_in := "both" ]  
+table(ds_ed_all$studied_in, ds_ed_all$comparison, exclude = NULL)
+
+head( ds_ed_all)
+head(ds_ed_all[ ds_sig == "T" & (edit_sig=="F" | is.na(edit_sig)), ])
+ds_ed_all[ ds_sig == "T" & edit_sig =="T", sig_in := "both" ]
+ds_ed_all[ ds_sig == "T" & (edit_sig=="F" | is.na(edit_sig)), sig_in := "ds" ]
+ds_ed_all[ (ds_sig=="F" | is.na(ds_sig)) & edit_sig=="T", sig_in := "edit" ]
+table(ds_ed_all$comparison, ds_ed_all$sig_in, exclude=NULL)
+
+```
+
+```{r saving , eval=F, include = F}
+fwrite(ds_ed_all, paste0(outPath, "ds_edit_comb_geneset.tsv"), sep="\t", quote=F, row.names = F)
+
+```
+
+
+```{r ds ed, eval=F, include=F}
+
+source("~/ipscAstrocyteNeuron/ipscAstroNeu/R/common_dge.R") #to get the gene ids for the genes
+ds_ed_all <- fread( paste0(outPath, "ds_edit_comb_geneset.tsv"))
+ds_ed_all <- replace(ds_ed_all, ds_ed_all=='', NA)
+table(ds_ed_all$comparison, ds_ed_all$studied_in, exclude=NULL)
+
+ds_ed_common <- ds_ed_all[ studied_in == "both", ]
+  
+table(ds_ed_common$comparison, ds_ed_common$sig_in, exclude=NULL)
+table(ds_ed_common$comparison, exclude= NULL)
+```
+
+```{r saving the ds ed, eval=F, include = F}
+fwrite(ds_ed_common, paste0(outPath, "ds_edit_common_geneset.tsv"), sep="\t", quote=F, row.names = F)
+```
+
+```{r counts common to the ds and ed, eval=F, include =F}
+head(ds_ed_common, 2)
+cts_commonset <-  as.data.table(table(ds_ed_common$comparison, ds_ed_common$sig_in, exclude=NULL))
+head(cts_commonset, 2)
+setnames(cts_commonset , old =c("V1", "V2", "N"), new= c("comparison", "sig_in", "nSig"))
+cts_commonset[, total_studied_in_both :=sum(nSig), by=comparison]
+cts_commonset[ ,pctSig := (nSig/total_studied_in_both)*100]
+cts_commonset[ is.na(sig_in), sig_in:= "neither"]
+fwrite(cts_commonset, paste0(outPath, "ds_edit_common_geneset_summ_counts.tsv"), sep="\t", quote=F, row.names = F)
+
+```
+
+
+#DS, DEd overlap
+
+## Common gene set
+
+<b>Astrocytes - treated vs untreated </b> <br>
+```{r summ table astr, eval=T, echo=F}
+dt_summ <- fread(paste0(outPath, "ds_edit_common_geneset_summ_counts.tsv"))
+DT::datatable(dt_summ[ comparison== "astrocyte_treated_vs_untreated", ])
+```
+<br>
+
+<br>
+<b>Co-culture - treated vs untreated </b><br>
+```{r summ table co-cul, eval=T, echo=F}
+DT::datatable(dt_summ[ comparison== "coculture_treated_vs_untreated", ])
+```
+
+<b>Fisher's Exact test run </b><br>
+```{r stat test for overlap between the DGE and DEd in the common geneset, eval =T, echo=F}
+ds_ed_all <- fread( paste0(outPath, "ds_edit_comb_geneset.tsv"))
+ds_ed_all <- replace(ds_ed_all, ds_ed_all=='', NA)
+common <- ds_ed_all[ studied_in== "both", ]
+table(common$ds_sig, exclude=NULL)
+
+common[ is.na(ds_sig),  ds_sig := "ds_sig_F"]
+common[ ds_sig == "T",  ds_sig := "ds_sig_T"]
+comp <- unique(common$comparison)
+head(common)
+ret_vals <- lapply(comp, function(cmp){
+  cat("\n=======\n", cmp, "\n")
+  df_conting <- as.data.frame.matrix(table(common[ comparison ==cmp , .(edit_sig, ds_sig) ], exclude=NULL))
+  print(df_conting)
+  fisher <- fisher.test(df_conting)$p.value
+  cat("\nFisher's Exact Test p-value =",fisher)
+  return(T)
+  })
+
+```
+
+###Enrichment analysis 
+Based on the decision to go with the bg of all sig DGE <br>
+- of the differentially expressed genes, what's special about the ones that are edited <br><br>
+
+running the same with the DS - taking the genes studied in both DS and ed <br>
+background : all DS and  query : sigDS and editing <br><br>
+ No enrichment found in any of gene cluster
+ 

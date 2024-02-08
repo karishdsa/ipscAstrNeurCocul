@@ -1,0 +1,447 @@
+---
+title: "SC19093 neuron - astrocyte co-cultures"
+subtitle: "Analysis of QC metrics for each individual sample"
+author: Stephanie Strohbuecker
+output: html_notebook
+---
+
+The following QC and pre-processing follows the workflow described in the [Seurat v3 tutorial](https://satijalab.org/seurat/v3.0/pbmc3k_tutorial.html).
+
+```{r}
+RMD_file_name <- "02.QC_individual_samples"
+```
+
+
+## Libraries
+
+```{r}
+library(tidyverse)
+library(here)
+
+library(ggpubr)
+
+library(Seurat)
+```
+
+## File locations
+Specify the location of input and output
+```{r}
+# File path to the base Cellranger count output
+file_path_10x <- here("input_data", "Cellranger")
+
+# Obtain the metadata information for each of the samples
+meta_data <- openxlsx::read.xlsx(
+  here(
+    "input_data",
+    "SC19093_ASF_extended_sample_description.xlsx"
+  ),
+  startRow = 3,
+  colNames = TRUE
+) %>%
+  slice(-(1:2)) %>%
+  slice(-NROW(.)) %>%
+  select_if(~ !all(is.na(.))) %>%
+  filter(!is.na(sample_description)) %>%
+  select(
+    Sample = `Sample/LIMSID`,
+    Name = `Sample/Name`,
+    sample_description,
+    sample_id = short_name
+  ) %>%
+  mutate(sample_id_t = sample_id) %>%
+  separate(sample_id_t,
+           into = c("cell_type", "treatment"),
+           sep = "_")
+
+# Path to output and figures directories
+output <- str_c(here(), "output", RMD_file_name, sep = "/")
+
+if (!dir.exists(output)) {
+  dir.create(output, recursive = TRUE)
+}
+
+figures_out <- str_c(here(), "figures", RMD_file_name, sep = "/")
+
+if (!dir.exists(figures_out)) {
+  dir.create(figures_out, recursive = TRUE)
+}
+
+```
+
+```{r}
+sample_path_10x <-
+  dir(
+    file_path_10x,
+    recursive = TRUE,
+    pattern = "filtered_feature_bc_matrix$",
+    include.dirs = TRUE,
+    full.names = TRUE
+  )
+
+sample_path_10x <- set_names(sample_path_10x, str_extract(sample_path_10x, "GAN343A[0-9]*"))
+```
+
+
+# Read data and generate the Seurat object
+
+```{r}
+SC19093_seurat <- map2(sample_path_10x, names(sample_path_10x), function(file_path, sample_name){
+  proj_name <- meta_data %>% filter(Sample == sample_name) %>% pull(sample_id)
+  proj_name
+  data_10x <- Read10X(file_path)
+  CreateSeuratObject(counts = data_10x, project = proj_name,
+                     min.cells = 3, min.features = 200)
+})
+SC19093_seurat
+```
+
+
+# Selecting cells for further analysis
+
+From the initial QC report produced by Cellranger count for each sample the following samples have failed QC:
+
+* GAN343A7 (astro_ctrl): too few cells
+* GAN343A11 (neur_ctrl): less than 30% of reads mapping to the transcriptome
+* GAN343A12 (neur_syn): less than 30% of reads mapping to the transcriptome
+
+[Commonly used QC metrics](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4758103/):
+
+* the number of unique genes detected in each cell
+    + low-quality cells or empty droplets will often have very few genes
+    + cell doublets or multiplets may exhibit an aberrantly high gene count
+* the total number of molecules detected within a cell (correlates strongly with unique genes)
+* the percentage of reads mapping to the mitochondrial genome
+    + low-quality/dying cells often exhibit extensive mitochondrial contamination
+    + calculate mitochondrial QC metrics with the `PercentageFeatureSet` function, which calculates the percentage of counts originating from a set of features
+    + use the set of all genes starting with `MT-¬ as a set of mitochondrial genes
+    
+```{r}
+SC19093_seurat <- map(SC19093_seurat, function(Seur_obj){
+  Seur_obj[["percent_mito"]] <- PercentageFeatureSet(Seur_obj, pattern = "^MT-")
+  Seur_obj
+})
+```
+
+## Visualise QC metrics
+```{r, fig.width=12}
+map(SC19093_seurat, function(Seur_obj) {
+  VlnPlot(
+    Seur_obj,
+    features = c("nFeature_RNA", "nCount_RNA", "percent_mito"),
+    ncol = 3
+  )
+})
+```
+
+```{r, fig.width=8}
+# FeatureScatter is typically used to visualise feature-feature relationships, but can be used for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+map(SC19093_seurat, function(Seur_obj) {
+CombinePlots(plots = list(
+  FeatureScatter(Seur_obj, feature1 = "nCount_RNA", feature2 = "percent_mito"),
+  FeatureScatter(Seur_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+),
+legend = "bottom")
+})
+```
+
+
+```{r, fig.width=8}
+map(SC19093_seurat, function(Seur_obj) {
+  Seur_obj[[]]
+}) %>% reduce(bind_rows) %>%
+  ggplot(aes(x = percent_mito, colour = orig.ident)) +
+  geom_vline(xintercept = 10) +
+  geom_density() +
+  ggtitle("Density plot for percentage of expressed mitochondrial genes") +
+  coord_cartesian(xlim = c(0, 30))
+```
+
+```{r, fig.width=8}
+map(SC19093_seurat, function(Seur_obj) {
+  Seur_obj[[]]
+}) %>% reduce(bind_rows) %>%
+  ggplot(aes(x = nFeature_RNA, colour = orig.ident)) +
+  geom_vline(xintercept = c(200, 3000)) +
+  geom_density() +
+  ggtitle("Density plot for the number of expressed features")
+```
+
+Based on the visualisation of the QC metrics, the following filter were applied across all samples:
+
+* filter out cells that have unique feature counts over 3000 and less than 200
+* filter out cells that have >10% mitochondrial counts
+
+```{r}
+SC19093_seurat_filtered <- map(SC19093_seurat, function(Seur_obj) {
+  subset(Seur_obj, subset = nFeature_RNA > 200 & nFeature_RNA < 3000 & percent_mito < 10)
+})
+```
+
+```{r}
+saveRDS(SC19093_seurat, file = str_c(output, "Seurat_individual_un-processed.rds", sep = "/"))
+```
+
+
+# Normalize the data
+
+The default method in Seurat v3 employs a global-scaling normalization method "LogNormalize" that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10000 by default), and log-transforms the result. The normalized values are stored in `seur_obj[["RNA"]]@data`
+```{r}
+SC19093_seurat_filtered <- map(SC19093_seurat_filtered, function(Seur_obj) {
+  NormalizeData(Seur_obj)
+})
+```
+
+# Identification of highly variable features
+
+Feature selection is an important step for single-cell analyses. One way to select features is to calculate a subset of features that exhibit high cell-to-cell variation in the dataset (i.e. they are highly expressed in some cells, and lowly expressed in others).
+
+The Seurat3 procedure directly models the mean-variance relationship inherent in single-cell data (`FindVariableFeatures`). By default it returns 2000 features per dataset which will be used in downstream analysis, such as PCA.
+```{r}
+SC19093_seurat_filtered <- map(SC19093_seurat_filtered, function(Seur_obj) {
+  FindVariableFeatures(Seur_obj, selection.method = "vst", nfeatures = 2000)
+})
+```
+
+The top 10 most highly variable genes in each dataset are 
+```{r}
+map(SC19093_seurat_filtered, function(Seur_obj) {
+  head(VariableFeatures(Seur_obj), 10) 
+})
+```
+
+```{r}
+map(SC19093_seurat_filtered, function(Seur_obj) {
+  VariableFeaturePlot(Seur_obj)
+})
+```
+
+# Scaling the data
+
+Apply a linear transformation ("scaling") that is a standard pre-processing step prior to dimension reduction techniques.
+The `ScaleData` function:
+
+* shifts the expression of each gene so that the mean expression across cells is 0
+* scales the expression of each gene so that the variance across cells is 1
+    + this step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate
+* the results are stored in `seur-Obj[["RNA"]]@scale.data
+
+```{r}
+SC19093_seurat_filtered <- map(SC19093_seurat_filtered, function(Seur_obj) {
+  all_genes <- rownames(Seur_obj)
+  ScaleData(Seur_obj, features = all_genes)
+})
+```
+
+# Perform linear dimensional reduction
+
+PCA is performed on the scaled data using, by default, only the previously determined variable features as input. A different set of features can be defined using the `features` argument.
+```{r}
+SC19093_seurat_filtered <- map(SC19093_seurat_filtered, function(Seur_obj) {
+  RunPCA(Seur_obj, features = VariableFeatures(object = Seur_obj))
+})
+```
+
+
+```{r}
+map(SC19093_seurat_filtered, function(Seur_obj) {
+  VizDimLoadings(Seur_obj, dims = 1:2, reduction = "pca")
+})
+```
+
+```{r}
+map(SC19093_seurat_filtered, function(Seur_obj) {
+  DimPlot(Seur_obj, reduction = "pca")
+})
+```
+
+
+`DimHeatmap` allows for easy exploration of primary sources of heterogeneity in a dataset, and can be useful when trying to decide which PCs to include for further downstream analyses. Both cells and features are ordered according to their PCA scores. Setting `cells` to a number plots the "extreme" cells on both ends of the spectrum. While clearly a supervised analysis, this is provides a valuable tool for exploring correlated feature sets.
+```{r}
+map(SC19093_seurat_filtered, function(Seur_obj) {
+  DimHeatmap(Seur_obj, dims = 1, cells = 500, balanced = TRUE)
+})
+```
+
+```{r, fig.height=12}
+map2(SC19093_seurat_filtered, names(SC19093_seurat_filtered), function(Seur_obj, Seur_obj_name) {
+  DimHeatmap(Seur_obj, dims = 1:15, cells = 500, balanced = TRUE, fast = FALSE) %>% 
+    annotate_figure(top = text_grob(meta_data %>%
+                                              filter(Sample == Seur_obj_name) %>%
+                                              pull(sample_description),
+                                            size = 32,
+                                            face = "bold"))
+})
+```
+
+# Determine the "dimensionality" of the dataset
+
+To overcome the extensive technical noise in any single feature for scRNA-seq data, Seurat clusters cells based on their PCA scores, with each PC essentially representing a "metafeature" that combines information across a correlated feature set. The top principal components therefore represent a robust compression of the dataset. 
+The number of components that should be included in the analysis needs to be determined
+
+## JackStraw procedure
+
+Implementation of a resampling test inspired by the JackStraw procedure. Random permutation of the data (1% by default) and rerunning of PCA to construct a "null distribution" of feature scores, and repeating this procedure. "significant" PCs are identified as those which have a strong enrichment of low p-value features
+
+```{r}
+SC19093_seurat_filtered <- map(SC19093_seurat_filtered, function(Seur_obj) {
+  Seur_obj <- JackStraw(Seur_obj, num.replicate = 100)
+  Seur_obj <- ScoreJackStraw(Seur_obj, dims = 1:20)
+  Seur_obj
+}
+)
+```
+
+When visualising the distribution of p-values for each PC with a uniform distribution (dashed line), "significant" PCs will show a strong enrichment of features with low p-values.
+```{r}
+map2(SC19093_seurat_filtered, names(SC19093_seurat_filtered), function(Seur_obj, Seur_obj_name) {
+  JackStrawPlot(Seur_obj, dims = 1:20) +
+    ggtitle(Seur_obj_name)
+})
+```
+
+
+An alternative heuristic method generates an "Elbow plot": a ranking of principle components based on the percentage of variance explained by each one.
+```{r}
+map2(SC19093_seurat_filtered, names(SC19093_seurat_filtered), function(Seur_obj, Seur_obj_name) {
+  ElbowPlot(Seur_obj)  +
+    ggtitle(Seur_obj_name)
+})
+```
+
+three suggested approaches to consider to identify the dimensionality of a dataset:
+
+1. exploring PCs to determine relevant sources of heterogeneity, which could be used, for example, in conjunction with GSEA
+2. statistical test based on a random null model, but is time-consuming for large datasets and may not return a clear PC cutoff
+3. commonly used heuristic, that can be calculated instantly
+
+In this case we identified the following PCs as cutoffs:
+
+* GAN343A7: 8
+* GAN343A8: 8
+* GAN343A9: 13 
+* GAN343A10: 15
+* GAN343A11: 20
+* GAN343A12: 20
+
+```{r}
+meta_data <- meta_data %>% 
+  add_column(PC_cutoff = c(8, 8, 13, 15, 20, 20))
+```
+
+# Cluster the cells
+
+Seurat v3 applies a graph-based clustering approach. The distance metric drives the clustering analysis based on previously identified PCs. The approach to partioning the cellular distance matric into cluster was heavily inspired by [SNN-Cliq, Xu and Su, Bioinformatics, 2015](bioinformatics.oxfordjournals.org/content/early/2015/02/10/bioinformatics.btv088.abstract) and [PhenoGraph, Levine et al., Cell, 2015](https://www.ncbi.nlm.nih.gov/pubmed/26095251). 
+These methods embed cells in a graph structure, e.g. K-nearest neighbour (KNN) graph, with edges drawn between cells with similar feature expression patterns, and then attempt to partition this graph into highly interconnected "quasi-cliques" or "communities".
+Seurat v3 first constructs a KNN graph based on the euclidian distance in PCA splace, and refine the edge weights between any two cells based on the shared overlap in their local neighbourhoods (Jaccard similarity).
+To cluster the cells, Seurat v3 next applies modularity optimisation techniques such as the Louvain algorithm (default) or [SLM](https://iopscience.iop.org/article/10.1088/1742-5468/2008/10/P10008) to iteratively group cells together, with the goal of optimizing the standard modularity function.
+The `FindClusters` function contains a resolution parameter that sets the "granularity" of the downstream clustering, with increased values leading to greater number of clusters. 
+The clusters can be found using the `Idents` function.
+```{r}
+SC19093_seurat_filtered <-
+  map2(SC19093_seurat_filtered, names(SC19093_seurat_filtered), function(Seur_obj, Seur_obj_name) {
+    FindNeighbors(Seur_obj, dims = 1:(
+      meta_data %>% filter(Sample == Seur_obj_name) %>% pull(PC_cutoff)
+    ))
+  })
+```
+
+```{r}
+SC19093_seurat_filtered <- map(SC19093_seurat_filtered,  function(Seur_obj){
+  FindClusters(Seur_obj, resolution = 0.5)
+})
+```
+
+
+# Run non-linear dimensional reduction (UMAP/tSNE)
+
+Seurat offers several non-linear reduction techniques, such as tSNE and UMAP, to visualise and explore datasets. The goal of these algorithms is to learn the underlying manifold of the data in order to place similar cells together in low-dimension space. Cells within the graph-based clusters determined above should co-localise on these dimension reducion plots. As input to the UMAP and tSNE, suggest to use the same PCs as input to the clustering analysis
+
+```{r}
+SC19093_seurat_filtered <-
+  map2(SC19093_seurat_filtered, names(SC19093_seurat_filtered), function(Seur_obj, Seur_obj_name) {
+    RunUMAP(Seur_obj, dims = 1:(
+      meta_data %>% filter(Sample == Seur_obj_name) %>% pull(PC_cutoff)
+    ))
+  })
+```
+
+
+```{r}
+map2(SC19093_seurat_filtered, names(SC19093_seurat_filtered), function(Seur_obj, Seur_obj_name){
+  DimPlot(Seur_obj, reduction = "umap") +
+    ggtitle(meta_data %>% filter(Sample == Seur_obj_name) %>% pull(sample_description))
+}) 
+```
+
+```{r}
+saveRDS(SC19093_seurat_filtered, file = str_c(output, "Seurat_individual_sample_pre-processed.rds", sep = "/"))
+```
+
+# Marker gene expression
+
+Marker for glia according to [here](https://www.labome.com/method/Neuronal-Cell-Markers.html) and [here](https://www.abcam.com/neuroscience/astrocyte-markers-and-functions)
+```{r, fig.height=12}
+map2(SC19093_seurat_filtered, names(SC19093_seurat_filtered), function(Seur_obj, Seur_obj_name) {
+  FeaturePlot(
+    Seur_obj,
+    features = c(
+      "GFAP",
+      "MFGE8",
+      "S100B",
+      "VIM",
+      "CNP",
+      "SLC1A3",
+      "SLC1A2",
+      "ALDH1L1"
+    )
+  )  %>%
+    ggpubr::annotate_figure(top = text_grob(
+      meta_data %>%
+        filter(Sample == Seur_obj_name) %>%
+        pull(sample_description),
+      size = 32,
+      face = "bold"
+    ))
+})
+```
+
+Marker for neurons according to [here](https://www.labome.com/method/Neuronal-Cell-Markers.html)
+```{r, fig.height=12}
+map2(SC19093_seurat_filtered, names(SC19093_seurat_filtered), function(Seur_obj, Seur_obj_name) {
+  FeaturePlot(
+    Seur_obj,
+    features = c(
+      "ASCL1",
+      "NES",
+      "ENO2",
+      "DCX",
+      "TUBB3",
+      "NEFM",
+      "MAP2",
+      "RBFOX3",
+      "CALB2",
+      "DLG4",
+      "TH",
+      "SYP",
+      "VAMP2"
+    )
+  )  %>%
+    ggpubr::annotate_figure(top = text_grob(
+      meta_data %>%
+        filter(Sample == Seur_obj_name) %>%
+        pull(sample_description),
+      size = 32,
+      face = "bold"
+    ))
+})
+```
+
+
+
+
+
+
+
+
+
+

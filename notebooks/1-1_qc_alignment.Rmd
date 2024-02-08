@@ -1,0 +1,198 @@
+---
+title: "Quality control (pre- and post-alignment) & alignment"
+author: "Karishma D'Sa"
+date: "24/08/2020"
+output: 
+  html_document:
+    code_folding: hide
+    number_sections: true
+    toc: true
+    toc_float: true
+    theme: flatly
+  df_print: paged
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Samples
+
+##Sample ids
+```{r eval=F, echo=FALSE}
+#all IPSC samples are labelled BX0175-0XX with the XX being the index of the 1-54 samples "
+setwd("/data/RNA_seq_ipsc/RNA_seq/2020-05-01/")
+fileList <- list.files()
+
+
+```
+
+#Pre-alignment QC and trimming using fastp
+ 
+- fastp trimming, followed by fastQC on the trimmed files and multiQC based on script from RNAseqProcessing package for Ryten lab (https://github.com/RHReynolds/RNAseqProcessing) 
+- fastp parameters set allow for automastic detection of adapters, correction of bases in case of mismatches in overlapping regions of paired-end reads, exclusion of reads with lengths shorter than 36bp and checks for sequence over-representation. Default settings were used for the remaining parameters, which included a base quality check such that only bases with a phred score >=Q15 were considered.
+
+
+```{bash eval=F}
+#Run once
+#git clone https://github.com/RHReynolds/RNAseqProcessing.git
+
+#export PATH="/tools/fastp/:/home/tools/FastQC/:"$PATH #added to .profile
+
+nohup Rscript \
+/home/RNAseqProcessing/QC/prealignmentQC_fastp_PEadapters.R \
+/data/RNA_seq_ipsc/RNA_seq/2020-05-01 \
+/data/RNA_seq_ipsc/processed/preAlignmentQC \
+RNASeq_astroNeuron_iPSCs \
+"" \
+"_R[13].*" \
+&>/home/ipscAstrocyteNeuron/ipscAstroNeu/R/logs/prealignmentQC_fastp_PEadapters.log&
+
+grep "QC and Trimming:" /home/ipscAstrocyteNeuron/ipscAstroNeu/R/logs/prealignmentQC_fastp_PEadapters.log | wc -l 
+
+```
+
+#Alignment
+The reads are aligned to the human genome (build GRCh38) using 2-pass STAR(v2.7.0a) and Ensembl reference(v93) as the single cell data has been aligned to Ensembl release 93, GRCh38 
+
+Details for the parameters  can be found at  https://github.com/RHReynolds/RNAseqProcessing/blob/master/alignment/alignment.md
+
+
+```{bash, eval = F}
+#Generating genome indexes
+# https://github.com/RHReynolds/RNAseqProcessing/blob/master/alignment/alignment.md
+#- Downloading the fasta files
+
+wget ftp.ensembl.org/pub/release-93/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+gunzip Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+mv Homo_sapiens.GRCh38.dna.primary_assembly.fa Homo_sapiens.GRCh38.93.dna.primary_assembly.fa
+mv Homo_sapiens.GRCh38.93.dna.primary_assembly.fa  /data/references/fasta
+
+#downloading the gtf
+mkdir /data/references/ensembl/gtf_gff3/v93
+cd /data/references/ensembl/gtf_gff3/v93
+wget ftp://ftp.ensembl.org/pub/release-93/gtf/homo_sapiens/Homo_sapiens.GRCh38.93.gtf.gz
+gunzip Homo_sapiens.GRCh38.93.gtf.gz
+
+#generating the genome index. takes ~ an hour
+mkdir /data/STAR_data/genome_index_hg38_ens_v93
+
+screen -S genGenInd
+version="93"
+genomeDir="/data/STAR_data/genome_index_hg38_ens_v"$version"/sjdbOverhang_99"
+fastaFile="/data/references/fasta/Homo_sapiens.GRCh38."$version".dna.primary_assembly.fa"
+gtfFile="/data/references/ensembl/gtf_gff3/v"$version"/Homo_sapiens.GRCh38."$version".gtf"
+export PATH=$PATH:/tools/STAR/STAR-2.7.0a/bin/Linux_x86_64_static/
+
+STAR --runThreadN 10 \
+--runMode genomeGenerate \
+--genomeDir $genomeDir \
+--genomeFastaFiles $fastaFile \
+--sjdbGTFfile $gtfFile \
+--sjdbOverhang 99
+
+```
+
+```{bash eval = F}
+#Aligning the reads
+
+export PATH=$PATH:/tools/STAR/STAR-2.7.0a/bin/Linux_x86_64_static/
+
+trimmedFilesPath="/data/RNA_seq_ipsc/processed/preAlignmentQC/fastp/"
+version="93"
+genomeDir="/data/STAR_data/genome_index_hg38_ens_v"$version"/sjdbOverhang_99"
+starOutputDir="/data/RNA_seq_ipsc/processed/star"
+
+samplePref="" 
+sampleSuff="_R[13].*" 
+
+#1st pass
+nohup Rscript \
+/home/RNAseqProcessing/alignment/STAR_alignment_withReadGroups_multi2pass.R \
+$trimmedFilesPath \
+$genomeDir \
+$starOutputDir \
+--sample_suffix=$sampleSuff \
+&>/data/RNA_seq_ipsc/processed/logs/starAlign_1pass.log&
+
+#Merge all the junctions from 1st pass
+##The merged junctions are saved to the file merged_junctions.SJ.out.tab in the output directory specified
+
+nohup Rscript /home/RNAseqProcessing/alignment/STAR_splice_junction_merge.R \
+$starOutputDir \
+-o $starOutputDir \
+&>/data/RNA_seq_ipsc/processed/logs/starSpliceJunc_merge.log&
+
+#saving the 1st pass indi sj files
+mkdir $starOutputDir/SJout_1pass/
+ls $starOutputDir/NM*_SJ.out.tab
+ll $starOutputDir/NM*_SJ.out.tab | wc -l #54
+
+mv $starOutputDir/NM*_SJ.out.tab $starOutputDir/SJout_1pass/ 
+
+#deleting the 1st pass alignment files
+rm /data/RNA_seq_ipsc/processed/star/NM*
+
+
+# 2nd pass
+sjFile=$starOutputDir"/merged_junctions.SJ.out.tab"
+nohup Rscript \
+/home/RNAseqProcessing/alignment/STAR_alignment_withReadGroups_multi2pass.R \
+$trimmedFilesPath \
+$genomeDir \
+$starOutputDir \
+--sample_suffix=$sampleSuff \
+--sj_file=$sjFile \
+--n_cores=2 \
+&>/data/RNA_seq_ipsc/processed/logs/starAlign_2pass_run2.log&
+
+```
+
+#Sort and index bam, post alignment QC with RSeQC
+
+```{bash, echo = T, eval = F}
+#creating bed file from gtf for use with RSeQC
+# Usage:
+#$ gtf2bed < foo.gtf > sorted-foo.gtf.bed
+
+version="93"
+gtfFile="/data/references/ensembl/gtf_gff3/v"$version"/Homo_sapiens.GRCh38."$version".gtf"
+bedFile="/data/references/ensembl/bed/v"$version"/ensembl_GRCh38_v"$version".bed"
+
+
+#using the script from https://expressionanalysis.github.io/ea-utils/ - RSeQC
+~/tools/ExpressionAnalysis-ea-utils-bd148d4/clipper/gtf2bed $gtfFile > $bedFile
+
+
+```
+
+```{bash, echo = T, eval = F}
+
+starOutputDir="/data/RNA_seq_ipsc/processed/star"
+outDir="/data/RNA_seq_ipsc/processed/postAlignment/"  
+sampleSuffix="_Aligned.sortedByCoord.out.bam" 
+readlen=150
+
+
+nohup Rscript \
+/tools/RNAseqProcessing/QC/post_alignment_QC_RSeQC.R \
+$starOutputDir \
+$outDir \
+$bedFile \
+$readlen \
+-s $sampleSuffix \
+--n_cores=5 \
+&>/home/ipscAstrocyteNeuron/ipscAstroNeu/R/logs/postAlign_rseqc.log&
+
+```
+
+#MultiQC
+
+```{bash, echo = T, eval = F}
+analysisPath="/data/RNA_seq_ipsc/processed/"
+outPath=$analysisPath"multiqc"
+mkdir $outPath
+multiqc $analysisPath -o $outPath --ignore */logs/* --ignore */multiqc/* -n multiqc_report_RNASeq_ipsc
+
+```
